@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {"recipient": "browser.search", "arguments": {"query": "llama.cpp release notes"}},
+    {"recipient": "browser.open", "arguments": {"cursor": 0, "id": 0}},
+    {"recipient": "browser.find", "arguments": {"cursor": 0, "pattern": "release"}},
+    {"recipient": "container.exec", "arguments": {"command": ["bash", "-lc", "printf ok"]}},
+    {"recipient": "repo_browser.print_tree", "arguments": {"path": "", "depth": 2}},
+    {"recipient": "repo_browser.search", "arguments": {"path": "", "query": "TODO"}},
+    {"recipient": "repo_browser.open_file", "arguments": {"path": "README.md", "line_start": 1, "line_end": 20}},
+    {"recipient": "repo_browser.list_dir", "arguments": {"path": "src", "depth": 1}},
+    {"recipient": "repo_browser.apply_patch", "arguments": {"patch": "*** Begin Patch\n*** End Patch\n"}},
+    {"recipient": "functions.normal_tool", "arguments": {"value": "ok"}}
+  ],
+  "required_round_trip_fields": ["recipient", "arguments", "reasoning_content", "channel", "tool_result"]
+}
