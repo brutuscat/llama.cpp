@@ -13,6 +13,10 @@
     {"role": "tool", "content": "src\nsrc/example.py"},
     {"role": "assistant", "thinking": "I can apply the small patch.", "tool_calls": [{"type": "function", "function": {"name": "repo_browser.apply_patch", "arguments": {"patch": "*** Begin Patch\n*** Update File: src/example.py\n@@\n-# TODO\n+# done\n*** End Patch\n"}}}]},
     {"role": "tool", "content": "Done!"},
+    {"role": "assistant", "thinking": "I will calculate in the isolated interpreter.", "tool_calls": [{"type": "function", "function": {"name": "python", "arguments": {"code": "from math import pi\nprint('π=', round(pi, 3))"}}}]},
+    {"role": "tool", "content": "π= 3.142"},
+    {"role": "assistant", "thinking": "I will use the native patch alias.", "tool_calls": [{"type": "function", "function": {"name": "apply_patch", "arguments": {"patch": "*** Begin Patch\n*** Update File: src/example.py\n@@\n-# done\n+# complete\n*** End Patch\n"}}}]},
+    {"role": "tool", "content": "Done!"},
     {"role": "assistant", "thinking": "I will run the repository test through the terminal.", "tool_calls": [{"type": "function", "function": {"name": "container.exec", "arguments": {"command": ["bash", "-lc", "pytest -q"]}}}]},
     {"role": "tool", "content": "1 passed"},
     {"role": "assistant", "thinking": "I will record the result with the ordinary function.", "tool_calls": [{"type": "function", "function": {"name": "normal_tool", "arguments": {"value": "done"}}}]},
@@ -26,9 +30,11 @@
     {"type": "function", "function": {"name": "repo_browser.open_file", "description": "Hidden dispatcher schema used by llama.cpp parsing.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "line_start": {"type": "number"}, "line_end": {"type": "number"}, "line_numbers": {"type": "boolean"}}, "required": ["path"], "additionalProperties": false}}},
     {"type": "function", "function": {"name": "repo_browser.list_dir", "description": "Hidden dispatcher schema used by llama.cpp parsing.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "depth": {"type": "number"}}, "required": ["path"], "additionalProperties": false}}},
     {"type": "function", "function": {"name": "repo_browser.apply_patch", "description": "Hidden dispatcher schema used by llama.cpp parsing.", "parameters": {"type": "object", "properties": {"patch": {"type": "string", "default": "*** Begin Patch\n*** End Patch\n"}}}}},
+    {"type": "function", "function": {"name": "python", "description": "Execute raw Python in the isolated Jupyter kernel.", "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"], "additionalProperties": false}}},
+    {"type": "function", "function": {"name": "apply_patch", "description": "Apply a patch in the selected isolated repository workspace.", "parameters": {"type": "object", "properties": {"patch": {"type": "string"}}, "required": ["patch"], "additionalProperties": false}}},
     {"type": "function", "function": {"name": "normal_tool", "description": "Ordinary OpenAI-compatible function.", "parameters": {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}}}
   ],
-  "builtin_tools": ["browser", "container", "repo_browser"],
+  "builtin_tools": ["python", "browser", "container", "repo_browser", "apply_patch"],
   "model_identity": "You are a test model.",
   "reasoning_effort": "low",
   "add_generation_prompt": true

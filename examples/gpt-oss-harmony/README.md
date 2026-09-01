@@ -8,7 +8,7 @@ It is not an upstream-ready llama.cpp product integration. A later upstream prop
 
 - `gpt-oss-native-tools.jinja` is an external overlay derived from the GPT-OSS template identified by SHA-256 `b2215de6da8ba369957eece8c5aa18f4af94f6c4d311d85e691373a421d80e89`.
 - `native-recipient-contract.json` records dotted native and ordinary function recipients that must round-trip.
-- `harmony-native-template.json` is a rendering fixture for browser, container, repo-browser, and ordinary function calls.
+- `harmony-native-template.json` is a rendering fixture for browser, container, repo-browser, Python, top-level patch, and ordinary function calls.
 - `run-template-contract.ps1` checks the rendered template with a caller-supplied `test-chat-template` binary.
 
 ## Isolated use only
@@ -19,7 +19,7 @@ Supply the overlay only to the isolated Harmony `llama-server` instance:
 llama-server --jinja --chat-template-file .\examples\gpt-oss-harmony\gpt-oss-native-tools.jinja <other-isolated-options>
 ```
 
-Do not replace the template, binary, service configuration, port, or API key of the Guardian deployment. Native browser, `container.exec`, and `repo_browser.*` are declared only when the isolated profile explicitly supplies their capability.
+Do not replace the template, binary, service configuration, port, or API key of the Guardian deployment. Native browser, `container.exec`, `repo_browser.*`, bare `python`, and top-level `apply_patch` are declared only when the isolated profile explicitly supplies their capability.
 
 ## Template contract
 
@@ -33,4 +33,4 @@ The parser implementation itself and its unit fixture remain in the native `comm
 
 ## Provenance
 
-L1 is the net diff from `aa7a8e0d774a1acb5ca3891220985c54c976dc81` to `251ed9309633a181d1dca5b2b1b82a857959dcd2`. Do not replay the abandoned intermediate commits `fef317d6` or `472831f3`.
+L1 is the net diff from `aa7a8e0d774a1acb5ca3891220985c54c976dc81` to `251ed9309633a181d1dca5b2b1b82a857959dcd2`; `6c58dfff` adds the trained bare `python` and `apply_patch` recipients. Do not replay the abandoned intermediate commits `fef317d6` or `472831f3`.
