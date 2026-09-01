@@ -1457,11 +1457,24 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
                 // clients can round-trip while native Harmony recipients remain
                 // first-class.
                 auto tool_name = p.tool_name(p.literal(name));
-                auto func_name = name.find('.') == std::string::npos
-                    ? p.literal(" to=functions.") + tool_name
-                    : p.literal(" to=") + p.optional(p.literal("functions.")) + tool_name;
+                // ``python`` is GPT-OSS's raw-code recipient and ``apply_patch``
+                // is the matching native singleton.  They are deliberately a
+                // fixed protocol allow-list: all dotted names remain generic and
+                // ordinary names remain under functions.*.
+                auto native_singleton = name == "python" || name == "apply_patch";
+                auto native_recipient = native_singleton || name.find('.') != std::string::npos;
+                auto func_name = native_recipient
+                    ? p.literal(" to=") + p.optional(p.literal("functions.")) + tool_name
+                    : p.literal(" to=functions.") + tool_name;
                 auto constraint = p.optional(p.space() + p.optional(p.literal("<|constrain|>")) + constrain_type);
-                auto args       = p.tool_args(p.schema(p.json(), "tool-" + name + "-schema", params));
+                // GPT-OSS sends native Python as raw multiline text.  The
+                // <|call|> is the preferred delimiter. It is an
+                // end-of-generation token in the server path, however, so the
+                // mapper also accepts and normalizes the raw body at EOF.
+                auto raw_python = p.zero_or_more(p.negate(p.literal("<|call|>")) + p.any());
+                auto args = name == "python"
+                    ? p.tool_args(raw_python) + p.optional(p.tool_close(p.literal("<|call|>")))
+                    : p.tool_args(p.schema(p.json(), "tool-" + name + "-schema", params));
 
                 // recipient in role header
                 //   <|start|>assistant to=functions.NAME<|channel|>(commentary|analysis)[constraint]<|message|>ARGS
@@ -1506,6 +1519,7 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
         data.grammar_triggers = {
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^\\s+to$" },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=functions$" },
+            { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=(?:python|apply_patch)$" },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=[A-Za-z_][A-Za-z0-9_]*\\." },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "<\\|start\\|>assistant(\\s+to)" },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "<\\|start\\|>assistant(<\\|channel\\|>(?:commentary|analysis)\\s+to)" }
@@ -3877,7 +3891,7 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
             } else {
                 mapper = std::make_unique<common_chat_peg_mapper>(msg);
             }
-            mapper->from_ast(ctx.ast, result);
+            mapper->from_ast(ctx.ast, result, is_partial);
 
             if (ctx.is_debug()) {
                 fprintf(stderr, "\nAST for partial parse (fail):\n%s\n", ctx.ast.dump().c_str());
@@ -3901,7 +3915,7 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
     } else {
         mapper = std::make_unique<common_chat_peg_mapper>(msg);
     }
-    mapper->from_ast(ctx.ast, result);
+    mapper->from_ast(ctx.ast, result, is_partial);
 
     if (ctx.is_debug()) {
         fprintf(stderr, "\nAST for %s parse:\n%s\n", is_partial ? "partial" : "full", ctx.ast.dump().c_str());

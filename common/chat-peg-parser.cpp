@@ -282,8 +282,16 @@ std::string common_chat_peg_mapper::normalize_container_value(const std::string 
 }
 
 void common_chat_peg_mapper::from_ast(const common_peg_ast_arena &    arena,
-                                      const common_peg_parse_result & parse_result_arg) {
+                                      const common_peg_parse_result & parse_result_arg,
+                                      bool                            is_partial) {
     arena.visit(parse_result_arg, [this](const common_peg_ast_node & node) { map(node); });
+    // <|call|> is an end-of-generation token in the server path and may not
+    // reach the parser AST. A raw Python body is complete at the end of this
+    // parse pass even when no explicit TOOL_CLOSE node was seen.
+    if (current_tool && current_tool->name == "python" && !is_partial && !args_buffer.empty()) {
+        current_tool->arguments = "{\"code\":" + ordered_json(args_buffer).dump() + "}";
+        args_buffer.clear();
+    }
     // Flush any pending tool call that was started but never got a name
     // This happens during partial parsing when the tool call is incomplete
     if (pending_tool_call.has_value() && !pending_tool_call->name.empty()) {
@@ -373,11 +381,20 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
     }
 
     if (is_tool_args && current_tool) {
-        // For JSON format: arguments come as a complete JSON object
-        // For tagged format: built up from individual arg_name/arg_value nodes
-        auto text = trim_trailing_space(node.text);
-        if (!text.empty() && text.front() == '{') {
-            args_target() = std::string(text);
+        // GPT-OSS's native python recipient carries raw code rather than a
+        // JSON object. Keep the raw text separate until the closing marker:
+        // interim streaming arguments stay as "{" (a prefix of the final
+        // object), while the completed call is normalized at the
+        // OpenAI-compatible boundary.
+        if (current_tool->name == "python") {
+            args_buffer = std::string(node.text);
+        } else {
+            // For JSON format: arguments come as a complete JSON object.
+            // For tagged format: built up from individual arg_name/arg_value nodes.
+            auto text = trim_trailing_space(node.text);
+            if (!text.empty() && text.front() == '{') {
+                args_target() = std::string(text);
+            }
         }
     }
 
@@ -434,6 +451,10 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
         // Flush buffer to arguments if tool name was never seen
         if (current_tool->name.empty() && !args_buffer.empty()) {
             current_tool->arguments = args_buffer;
+            args_buffer.clear();
+        }
+        if (current_tool->name == "python") {
+            current_tool->arguments = "{\"code\":" + ordered_json(args_buffer).dump() + "}";
             args_buffer.clear();
         }
         // Close any pending string quote
@@ -953,7 +974,7 @@ common_peg_parser common_chat_peg_builder::standard_json_tools(
     return force_tool_calls ? section : optional(section);
 }
 
-void common_chat_peg_gemma4_mapper::from_ast(const common_peg_ast_arena & arena, const common_peg_parse_result & result) {
+void common_chat_peg_gemma4_mapper::from_ast(const common_peg_ast_arena & arena, const common_peg_parse_result & result, bool /* is_partial */) {
     for (const auto & node : result.nodes) {
         visit(arena, node);
     }
@@ -1196,7 +1217,8 @@ static std::string minimax_m3_value_to_json(const common_peg_ast_arena & arena, 
 }
 
 void common_chat_peg_minimax_m3_mapper::from_ast(const common_peg_ast_arena &    arena,
-                                                 const common_peg_parse_result & result) {
+                                                 const common_peg_parse_result & result,
+                                                 bool /* is_partial */) {
     for (const auto & node : result.nodes) {
         visit(arena, node);
     }

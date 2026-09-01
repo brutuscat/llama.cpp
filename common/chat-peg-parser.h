@@ -15,7 +15,7 @@ class common_chat_peg_mapper {
 
     virtual ~common_chat_peg_mapper() = default;
 
-    virtual void from_ast(const common_peg_ast_arena & arena, const common_peg_parse_result & result);
+    virtual void from_ast(const common_peg_ast_arena & arena, const common_peg_parse_result & result, bool is_partial);
     virtual void map(const common_peg_ast_node & node);
   protected:
     virtual std::string normalize_container_value(const std::string & input);
@@ -35,7 +35,7 @@ class common_chat_peg_mapper {
 class common_chat_peg_gemma4_mapper : public common_chat_peg_mapper {
   public:
     common_chat_peg_gemma4_mapper(common_chat_msg & msg) : common_chat_peg_mapper(msg) {}
-    virtual void from_ast(const common_peg_ast_arena & arena, const common_peg_parse_result & result);
+    virtual void from_ast(const common_peg_ast_arena & arena, const common_peg_parse_result & result, bool is_partial);
   private:
     void visit(const common_peg_ast_arena & arena, common_peg_ast_id id);
 };
@@ -47,7 +47,7 @@ class common_chat_peg_minimax_m3_mapper : public common_chat_peg_mapper {
     static constexpr const char * TOOL_ARG_ITEM   = "tool-arg-item";
 
     common_chat_peg_minimax_m3_mapper(common_chat_msg & msg) : common_chat_peg_mapper(msg) {}
-    virtual void from_ast(const common_peg_ast_arena & arena, const common_peg_parse_result & result);
+    virtual void from_ast(const common_peg_ast_arena & arena, const common_peg_parse_result & result, bool is_partial);
   private:
     void visit(const common_peg_ast_arena & arena, common_peg_ast_id id);
 };

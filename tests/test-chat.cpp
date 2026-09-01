@@ -2114,6 +2114,12 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
     const common_chat_tool repo_browser_search_tool{
         "repo_browser.search", "Search a repository", R"({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]})"
     };
+    const common_chat_tool python_tool{
+        "python", "Execute raw Python", R"({"type":"object","properties":{"code":{"type":"string"}},"required":["code"]})"
+    };
+    const common_chat_tool apply_patch_tool{
+        "apply_patch", "Apply a patch", R"({"type":"object","properties":{"patch":{"type":"string"}},"required":["patch"]})"
+    };
     const common_chat_tool normal_function_tool{
         "normal_tool", "An ordinary function", R"({"type":"object","properties":{"value":{"type":"string"}},"required":["value"]})"
     };
@@ -2146,6 +2152,30 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
         .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
         .tools({ repo_browser_search_tool })
         .expect_tool_calls({ { "repo_browser.search", R"({"query":"TODO"})", {} } })
+        .run();
+
+    tst.test(" to=python<|channel|>commentary<|message|>import math\nprint('π', math.pi)<|call|>")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tools({ python_tool })
+        .expect_tool_calls({ { "python", R"PY({"code":"import math\nprint('π', math.pi)"})PY", {} } })
+        .run();
+
+    tst.test(" to=python<|channel|>commentary<|message|>{'unicode': 'λ', 'value': 2}<|call|>")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tools({ python_tool })
+        .expect_tool_calls({ { "python", R"PY({"code":"{'unicode': 'λ', 'value': 2}"})PY", {} } })
+        .run();
+
+    tst.test(" to=python<|channel|>commentary<|message|>print('end-of-generation')")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tools({ python_tool })
+        .expect_tool_calls({ { "python", R"PY({"code":"print('end-of-generation')"})PY", {} } })
+        .run();
+
+    tst.test(" to=apply_patch<|channel|>commentary<|message|>{\"patch\":\"*** Begin Patch\\n*** End Patch\\n\"}")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tools({ apply_patch_tool })
+        .expect_tool_calls({ { "apply_patch", R"({"patch":"*** Begin Patch\n*** End Patch\n"})", {} } })
         .run();
 
     tst.test(" to=functions.normal_tool<|channel|>commentary<|message|>{\"value\":\"kept generic\"}")
