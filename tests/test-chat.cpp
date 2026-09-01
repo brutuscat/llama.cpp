@@ -2092,6 +2092,69 @@ static void test_lfm2_parser(const std::string & template_path, bool detailed_de
 
 }
 
+// Native Harmony tools are namespace-qualified in GPT-OSS output. Keep this
+// focused suite runnable independently so Windows validation does not depend
+// on the complete (and optional) template fixture set.
+static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
+    auto fixture_templates = read_templates("tests/gpt-oss-native-tools.jinja");
+    assert_contains(common_chat_templates_source(fixture_templates.get()), "<|channel|>");
+    auto tst = peg_tester("tests/gpt-oss-native-tools.jinja", detailed_debug);
+    const common_chat_tool browser_search_tool{
+        "browser.search", "Search the browser", R"({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]})"
+    };
+    const common_chat_tool browser_open_tool{
+        "browser.open", "Open a browser cursor", R"({"type":"object","properties":{"cursor":{"type":"integer"}},"required":["cursor"]})"
+    };
+    const common_chat_tool browser_find_tool{
+        "browser.find", "Find text in a browser cursor", R"({"type":"object","properties":{"pattern":{"type":"string"}},"required":["pattern"]})"
+    };
+    const common_chat_tool container_exec_tool{
+        "container.exec", "Execute a command", R"({"type":"object","properties":{"command":{"type":"array","items":{"type":"string"}}},"required":["command"]})"
+    };
+    const common_chat_tool repo_browser_search_tool{
+        "repo_browser.search", "Search a repository", R"({"type":"object","properties":{"query":{"type":"string"}},"required":["query"]})"
+    };
+    const common_chat_tool normal_function_tool{
+        "normal_tool", "An ordinary function", R"({"type":"object","properties":{"value":{"type":"string"}},"required":["value"]})"
+    };
+
+    tst.test(" to=browser.search<|channel|>analysis<|message|>{\"query\":\"llama.cpp releases\"}")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tools({ browser_search_tool })
+        .expect_tool_calls({ { "browser.search", R"({"query":"llama.cpp releases"})", {} } })
+        .run();
+
+    tst.test("<|channel|>commentary to=browser.open<|message|>{\"cursor\":3}")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tools({ browser_open_tool })
+        .expect_tool_calls({ { "browser.open", R"({"cursor":3})", {} } })
+        .run();
+
+    tst.test(" to=browser.find<|channel|>analysis<|message|>{\"pattern\":\"release\"}")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tools({ browser_find_tool })
+        .expect_tool_calls({ { "browser.find", R"({"pattern":"release"})", {} } })
+        .run();
+
+    tst.test(" to=container.exec<|channel|>commentary<|message|>{\"command\":[\"bash\",\"-lc\",\"pwd\"]}")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tools({ container_exec_tool })
+        .expect_tool_calls({ { "container.exec", R"({"command":["bash","-lc","pwd"]})", {} } })
+        .run();
+
+    tst.test(" to=repo_browser.search<|channel|>analysis<|message|>{\"query\":\"TODO\"}")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tools({ repo_browser_search_tool })
+        .expect_tool_calls({ { "repo_browser.search", R"({"query":"TODO"})", {} } })
+        .run();
+
+    tst.test(" to=functions.normal_tool<|channel|>commentary<|message|>{\"value\":\"kept generic\"}")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tools({ normal_function_tool })
+        .expect_tool_calls({ { "normal_tool", R"({"value":"kept generic"})", {} } })
+        .run();
+}
+
 static void test_template_output_peg_parsers(bool detailed_debug) {
     LOG_DBG("%s\n", __func__);
 
@@ -6053,6 +6116,10 @@ static void test_template_output_peg_parsers(bool detailed_debug) {
             .expect(message_assist_call)
             .run();
 
+        // Native Harmony recipients stay in their namespaces. Generic tools
+        // remain under functions.*, and all paths resolve to structured calls.
+        test_gpt_oss_native_tool_recipients(detailed_debug);
+
         // Tool call with reasoning + content (analysis first, then tool call)
         tst.test(
                "<|channel|>analysis<|message|>I'm\nthinking<|end|>"
@@ -7155,8 +7222,9 @@ static void test_msg_diffs_compute() {
 }
 
 int main(int argc, char ** argv) {
-    bool detailed_debug    = false;
-    bool only_run_filtered = false;
+    bool detailed_debug                   = false;
+    bool only_run_filtered                = false;
+    bool only_run_native_tool_recipients  = false;
 
     // Check for --template and --detailed flags
     for (int i = 1; i < argc; i++) {
@@ -7174,6 +7242,20 @@ int main(int argc, char ** argv) {
             g_force_reconstruction_test = true;
             only_run_filtered          = true;
         }
+        if (arg == "--gpt-oss-native-tool-recipients") {
+            only_run_native_tool_recipients = true;
+        }
+    }
+
+    if (only_run_native_tool_recipients) {
+        try {
+            test_gpt_oss_native_tool_recipients(detailed_debug);
+        } catch (const std::exception & e) {
+            LOG_ERR("GPT-OSS native tool recipient test failed: %s\n", e.what());
+            return 1;
+        }
+        std::cout << "\n[chat] GPT-OSS native tool recipient tests passed!" << '\n';
+        return 0;
     }
 
     if (only_run_filtered) {

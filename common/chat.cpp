@@ -1450,7 +1450,16 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
                 std::string  name     = function.at("name");
                 const auto & params   = function.at("parameters");
 
-                auto func_name  = p.literal(" to=functions.") + p.tool_name(p.literal(name));
+                // GPT-OSS uses `functions.NAME` for ordinary OpenAI-compatible
+                // functions, but its built-in namespaces use a native recipient
+                // such as `browser.search` or `container.exec`. Keep accepting
+                // the old `functions.` prefix for dotted names so existing
+                // clients can round-trip while native Harmony recipients remain
+                // first-class.
+                auto tool_name = p.tool_name(p.literal(name));
+                auto func_name = name.find('.') == std::string::npos
+                    ? p.literal(" to=functions.") + tool_name
+                    : p.literal(" to=") + p.optional(p.literal("functions.")) + tool_name;
                 auto constraint = p.optional(p.space() + p.optional(p.literal("<|constrain|>")) + constrain_type);
                 auto args       = p.tool_args(p.schema(p.json(), "tool-" + name + "-schema", params));
 
@@ -1497,6 +1506,7 @@ static common_chat_params common_chat_params_init_gpt_oss(const common_chat_temp
         data.grammar_triggers = {
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^\\s+to$" },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=functions$" },
+            { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=[A-Za-z_][A-Za-z0-9_]*\\." },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "<\\|start\\|>assistant(\\s+to)" },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "<\\|start\\|>assistant(<\\|channel\\|>(?:commentary|analysis)\\s+to)" }
         };
