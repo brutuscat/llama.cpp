@@ -20,7 +20,7 @@
   {%- set rendered = namespace(any=false) -%}
   {%- for entry in tools -%}
     {%- set tool = entry.function -%}
-    {%- if '.' not in tool.name -%}
+    {%- if '.' not in tool.name and tool.name not in ['python', 'apply_patch'] -%}
       {%- if not rendered.any -%}
         {{- '## functions\n\nnamespace functions {\n\n' -}}
         {%- set rendered.any = true -%}
@@ -37,6 +37,9 @@
 {%- endmacro -%}
 
 {%- macro native_builtin_tools() -%}
+  {%- if builtin_tools and 'python' in builtin_tools -%}
+    {{- '## python\n\nUse this tool to execute STATELESS Python code in your chain of thought. The code will not be shown to the user. This tool should be used for internal reasoning, but not for code that is intended to be visible to the user (for example, when creating plots, tables, or files).\n\nWhen you send a message containing Python code to python, it will be executed in a stateless isolated Jupyter kernel. python will respond with the output of the execution or time out after 60 seconds. Use print statements to access text output. IMPORTANT: your Python environment is not shared between calls; pass all required code each time. Files under /home/user persist in the isolated P1 workspace. Network access and host-shell access are unavailable. Send code directly to the bare recipient python: never use functions.python and never wrap the code in JSON.\n\n' -}}
+  {%- endif -%}
   {%- if builtin_tools and 'browser' in builtin_tools -%}
     {{- '## browser\n\n// Tool for web research. Cite opened pages as 【{cursor}†L{line_start}-L{line_end}】.\n// Use a short linear plan: search once for an authoritative source, open the relevant result id,\n// and use find only when you need a precise term or line. You have a hard budget of four browser\n// calls per answer. For a two-source task, use one search and at most two opens; reserve the final\n// call for find only when needed. After that budget, write the final answer instead of retrying.\n// Do not repeat a search or retry a failed browser call with the same inputs. Once an opened source\n// supports the answer, stop calling browser tools. Every browser-backed factual answer must include\n// at least one exact native line citation; do not substitute a bare source card for 【cursor†Lstart-Lend】.\nnamespace browser {\n\n' -}}
     {{- '// Search the configured web provider. Omit source: it is fixed to that provider. Open a returned result id instead of searching again.\n' -}}
@@ -58,15 +61,19 @@
     {{- 'type list_dir = (_: {path: string, depth?: number}) => any;\n\n' -}}
     {{- 'type apply_patch = (_: {patch?: string}) => any;\n\n} // namespace repo_browser\n\n' -}}
   {%- endif -%}
+  {%- if builtin_tools and 'apply_patch' in builtin_tools -%}
+    {{- '## apply_patch\n\n// Apply a patch only inside the selected isolated repository workspace.\n// The patch must use the *** Begin Patch / *** End Patch format.\n\ntype apply_patch = (_: {patch: string}) => any;\n\n' -}}
+  {%- endif -%}
 {%- endmacro -%}
 
 {%- macro recipient(name) -%}
-  {{- name if '.' in name else 'functions.' + name -}}
+  {{- name if name in ['python', 'apply_patch'] or '.' in name else 'functions.' + name -}}
 {%- endmacro -%}
 
 {{- '<|start|>system<|message|>' -}}
 {{- model_identity if model_identity is defined else 'You are ChatGPT, a large language model trained by OpenAI.' -}}
 {{- '\nKnowledge cutoff: 2024-06\nCurrent date: ' + strftime_now('%Y-%m-%d') + '\n\nReasoning: ' + (reasoning_effort if reasoning_effort is defined else 'medium') + '\n\n' -}}
+{%- if builtin_tools -%}{{- '# Tools\n\n' -}}{%- endif -%}
 {{- native_builtin_tools() -}}
 {{- '# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|>' -}}
 
@@ -90,7 +97,11 @@
     {%- if 'tool_calls' in message -%}
       {%- set call = message.tool_calls[0].function if message.tool_calls[0].function else message.tool_calls[0] -%}
       {%- if message.content -%}{{- '<|start|>assistant<|channel|>analysis<|message|>' + message.content + '<|end|>' -}}{%- elif message.thinking -%}{{- '<|start|>assistant<|channel|>analysis<|message|>' + message.thinking + '<|end|>' -}}{%- endif -%}
-      {{- '<|start|>assistant to=' + recipient(call.name) + '<|channel|>commentary ' + (call.content_type if call.content_type is defined else 'json') + '<|message|>' + call.arguments|tojson + '<|call|>' -}}
+      {%- if call.name == 'python' -%}
+        {{- '<|start|>assistant to=python<|channel|>commentary<|message|>' + (call.arguments if call.arguments is string else call.arguments.code) + '<|call|>' -}}
+      {%- else -%}
+        {{- '<|start|>assistant to=' + recipient(call.name) + '<|channel|>commentary ' + (call.content_type if call.content_type is defined else 'json') + '<|message|>' + call.arguments|tojson + '<|call|>' -}}
+      {%- endif -%}
       {%- set last_tool_call.name = call.name -%}
     {%- else -%}
       {{- '<|start|>assistant<|channel|>final<|message|>' + message.content + '<|end|>' -}}
