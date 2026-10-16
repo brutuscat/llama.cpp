@@ -1,0 +1,115 @@
+{#
+  Derived from the GPT-OSS template served by the Guardian b10566 /props endpoint.
+  Base SHA256: b2215de6da8ba369957eece8c5aa18f4af94f6c4d311d85e691373a421d80e89
+
+  This overlay deliberately leaves dotted tools in the API `tools` payload so
+  llama.cpp can parse their schemas, but never renders them in `functions`.
+  Browser, container, and repo_browser are declared in their native Harmony namespaces.
+#}
+{%- macro ts_type(spec) -%}
+  {%- if spec.type == 'string' -%}string
+  {%- elif spec.type in ['number', 'integer'] -%}number
+  {%- elif spec.type == 'boolean' -%}boolean
+  {%- elif spec.type == 'array' -%}{{ ts_type(spec['items']) if spec['items'] else 'any' }}[]
+  {%- elif spec.type == 'object' -%}object
+  {%- else -%}any
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro generic_functions(tools) -%}
+  {%- set rendered = namespace(any=false) -%}
+  {%- for entry in tools -%}
+    {%- set tool = entry.function -%}
+    {%- if '.' not in tool.name and (tool.name not in ['python', 'apply_patch'] or not builtin_tools or tool.name not in builtin_tools) -%}
+      {%- if not rendered.any -%}
+        {{- '## functions\n\nnamespace functions {\n\n' -}}
+        {%- set rendered.any = true -%}
+      {%- endif -%}
+      {{- '// ' + (tool.description or '') + '\n' -}}
+      {{- 'type ' + tool.name + ' = (_: {\n' -}}
+      {%- for name, spec in (tool.parameters.properties or {}).items() -%}
+        {{- name + ('' if name in (tool.parameters.required or []) else '?') + ': ' + ts_type(spec) + ',\n' -}}
+      {%- endfor -%}
+      {{- '}) => any;\n\n' -}}
+    {%- endif -%}
+  {%- endfor -%}
+  {%- if rendered.any -%}{{- '} // namespace functions' -}}{%- endif -%}
+{%- endmacro -%}
+
+{%- macro native_builtin_tools() -%}
+  {%- if builtin_tools and 'python' in builtin_tools -%}
+    {{- '## python\n\nUse this tool to execute STATELESS Python code in your chain of thought. The code will not be shown to the user. This tool should be used for internal reasoning, but not for code that is intended to be visible to the user (for example, when creating plots, tables, or files).\n\nWhen you send a message containing Python code to python, it will be executed in a stateless isolated Jupyter kernel. python will respond with the output of the execution or time out after 60 seconds. Use print statements to access text output. IMPORTANT: your Python environment is not shared between calls; pass all required code each time. Files under /home/user persist in the isolated P1 workspace. Network access and host-shell access are unavailable. Send code directly to the bare recipient python: never use functions.python and never wrap the code in JSON.\n\n' -}}
+  {%- endif -%}
+  {%- if builtin_tools and 'browser' in builtin_tools -%}
+    {{- '## browser\n\n// Tool for web research. Cite opened pages as 【{cursor}†L{line_start}-L{line_end}】.\n// Use a short linear plan: search once for an authoritative source, open the relevant result id,\n// and use find only when you need a precise term or line. You have a hard budget of four browser\n// calls per answer. For a two-source task, use one search and at most two opens; reserve the final\n// call for find only when needed. After that budget, write the final answer instead of retrying.\n// Do not repeat a search or retry a failed browser call with the same inputs. Once an opened source\n// supports the answer, stop calling browser tools. Every browser-backed factual answer must include\n// at least one exact native line citation; do not substitute a bare source card for 【cursor†Lstart-Lend】.\nnamespace browser {\n\n' -}}
+    {{- '// Search the configured web provider. Omit source: it is fixed to that provider. Open a returned result id instead of searching again.\n' -}}
+    {{- 'type search = (_: {query: string, topn?: number, source?: string}) => any;\n\n' -}}
+    {{- '// Open a search-result id or an existing cursor; use loc only to read a later line range.\n' -}}
+    {{- 'type open = (_: {id?: number | string, cursor?: number, loc?: number, num_lines?: number, view_source?: boolean, source?: string}) => any;\n\n' -}}
+    {{- '// Find a literal pattern in the most recently opened cursor unless a cursor is supplied.\n' -}}
+    {{- 'type find = (_: {pattern: string, cursor?: number}) => any;\n\n} // namespace browser\n\n' -}}
+  {%- endif -%}
+  {%- if builtin_tools and 'container' in builtin_tools -%}
+    {{- '## container\n\nnamespace container {\n\n' -}}
+    {{- 'type exec = (_: {command: string[]}) => any;\n\n} // namespace container\n\n' -}}
+  {%- endif -%}
+  {%- if builtin_tools and 'repo_browser' in builtin_tools -%}
+    {{- '## repo_browser\n\nnamespace repo_browser {\n\n' -}}
+    {{- 'type print_tree = (_: {path: string, depth: number}) => any;\n\n' -}}
+    {{- 'type search = (_: {path: string, query: string, max_results?: number}) => any;\n\n' -}}
+    {{- 'type open_file = (_: {path: string, line_start?: number, line_end?: number, line_numbers?: boolean}) => any;\n\n' -}}
+    {{- 'type list_dir = (_: {path: string, depth?: number}) => any;\n\n' -}}
+    {{- 'type apply_patch = (_: {patch?: string}) => any;\n\n} // namespace repo_browser\n\n' -}}
+  {%- endif -%}
+  {%- if builtin_tools and 'apply_patch' in builtin_tools -%}
+    {{- '## apply_patch\n\n// Apply a patch only inside the selected isolated repository workspace.\n// The patch must use the *** Begin Patch / *** End Patch format.\n\ntype apply_patch = (_: {patch: string}) => any;\n\n' -}}
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro recipient(name) -%}
+  {{- name if '.' in name or (builtin_tools and name in builtin_tools and name in ['python', 'apply_patch']) else 'functions.' + name -}}
+{%- endmacro -%}
+
+{{- '<|start|>system<|message|>' -}}
+{{- model_identity if model_identity is defined else 'You are ChatGPT, a large language model trained by OpenAI.' -}}
+{{- '\nKnowledge cutoff: 2024-06\nCurrent date: ' + strftime_now('%Y-%m-%d') + '\n\nReasoning: ' + (reasoning_effort if reasoning_effort is defined else 'medium') + '\n\n' -}}
+{%- if builtin_tools -%}{{- '# Tools\n\n' -}}{%- endif -%}
+{{- native_builtin_tools() -}}
+{{- '# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|>' -}}
+
+{%- if tools -%}
+  {{- '<|start|>developer<|message|>' -}}
+  {{- '# Tools\n\n' + generic_functions(tools) -}}
+  {{- '<|end|>' -}}
+{%- endif -%}
+
+{%- set last_tool_call = namespace(name=none) -%}
+{%- for message in messages -%}
+  {%- if message.role == 'assistant' -%}
+    {%- if message.tool_calls -%}
+      {%- if message.tool_calls|length != 1 -%}{{- raise_exception('GPT-OSS requires one tool call per message') -}}{%- endif -%}
+      {%- set call = message.tool_calls[0].function if message.tool_calls[0].function else message.tool_calls[0] -%}
+      {%- if call.arguments is string -%}{{- raise_exception('Tool arguments must be decoded JSON; use the common chat template renderer') -}}{%- endif -%}
+      {%- if message.content -%}{{- '<|start|>assistant<|channel|>analysis<|message|>' + message.content + '<|end|>' -}}{%- elif message.thinking -%}{{- '<|start|>assistant<|channel|>analysis<|message|>' + message.thinking + '<|end|>' -}}{%- endif -%}
+      {%- if call.name == 'python' and builtin_tools and 'python' in builtin_tools -%}
+        {{- '<|start|>assistant to=python<|channel|>commentary<|message|>' + call.arguments.code + '<|call|>' -}}
+      {%- else -%}
+        {{- '<|start|>assistant to=' + recipient(call.name) + '<|channel|>commentary ' + (call.content_type if call.content_type is defined else 'json') + '<|message|>' + call.arguments|tojson + '<|call|>' -}}
+      {%- endif -%}
+      {%- set last_tool_call.name = call.name -%}
+    {%- else -%}
+      {{- '<|start|>assistant<|channel|>final<|message|>' + message.content + '<|end|>' -}}
+      {%- set last_tool_call.name = none -%}
+    {%- endif -%}
+  {%- elif message.role == 'tool' -%}
+    {%- if last_tool_call.name is none -%}{{- raise_exception('Tool message has no preceding tool call') -}}{%- endif -%}
+    {{- '<|start|>' + recipient(last_tool_call.name) + ' to=assistant<|channel|>commentary<|message|>' + message.content + '<|end|>' -}}
+    {%- set last_tool_call.name = none -%}
+  {%- elif message.role == 'user' -%}
+    {{- '<|start|>user<|message|>' + message.content + '<|end|>' -}}
+    {%- set last_tool_call.name = none -%}
+  {%- elif message.role in ['system', 'developer'] -%}
+    {{- '<|start|>developer<|message|>' + message.content + '<|end|>' -}}
+  {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}<|start|>assistant{%- endif -%}

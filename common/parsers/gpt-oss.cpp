@@ -68,6 +68,13 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
     auto include_grammar     = has_response_format || (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE);
     auto extract_reasoning   = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
 
+    foreach_function(inputs.tools, [&](const json & tool) {
+        const auto name = tool.at("function").at("name").get<std::string>();
+        if (name == "python" || name == "apply_patch" || name.find('.') != std::string::npos) {
+            data.message_delimiters.add(COMMON_CHAT_ROLE_TOOL, "<|start|>" + name);
+        }
+    });
+
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
         auto start           = p.rule("start", p.literal("<|start|>assistant"));
         auto end             = p.rule("end", p.literal("<|end|>"));
@@ -111,19 +118,31 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
                 std::string  name     = function.at("name");
                 const auto   params   = common_chat_tool_parameters(function);
 
-                auto func_name  = p.literal(" to=functions.") + p.tool_name(p.literal(name));
                 auto constraint = p.optional(p.space() + p.optional(p.literal("<|constrain|>")) + constrain_type);
-                auto args       = p.tool_args(p.schema(p.json(), "tool-" + name + "-schema", params));
+                auto json_args = p.tool_args(p.schema(p.json(), "tool-" + name + "-schema", params));
+                auto raw_body = p.until("<|call|>");
+                auto close = p.optional(p.tool_close(p.literal("<|call|>")));
+                auto call = [&](const common_peg_parser & recipient, const common_peg_parser & args) {
+                    auto in_role = p.tool(p.tool_open(recipient + channel + constraint + p.literal("<|message|>")) + args + close);
+                    auto in_channel = p.tool(p.tool_open(channel + recipient + constraint + p.literal("<|message|>")) + args + close);
+                    return in_role | in_channel;
+                };
 
-                // recipient in role header
-                //   <|start|>assistant to=functions.NAME<|channel|>(commentary|analysis)[constraint]<|message|>ARGS
-                auto tool_in_role = p.tool(p.tool_open(func_name + channel + constraint + p.literal("<|message|>")) + args);
-
-                // recipient in channel header
-                //   <|channel|>(commentary|analysis) to=functions.NAME[constraint]<|message|>ARGS
-                auto tool_in_channel = p.tool(p.tool_open(channel + func_name + constraint + p.literal("<|message|>")) + args);
-
-                tool_choice |= p.rule("tool-" + name, tool_in_role | tool_in_channel);
+                auto ordinary_name = p.literal(" to=functions.") + p.tool_name(p.literal(name));
+                auto native_name = p.literal(" to=") + p.tool_name(p.literal(name));
+                if (name == "python") {
+                    // Bare Python carries code; functions.python keeps its JSON schema.
+                    tool_choice |= p.rule("tool-" + name,
+                        call(native_name, p.tool_args_raw(raw_body, "code")) | call(ordinary_name, json_args));
+                } else {
+                    auto recipient = name == "apply_patch" || name.find('.') != std::string::npos
+                        ? p.literal(" to=") + p.optional(p.literal("functions.")) + p.tool_name(p.literal(name))
+                        : ordinary_name;
+                    auto args = name == "apply_patch"
+                        ? json_args | p.tool_args_raw(p.literal("*** Begin Patch") + raw_body, "patch")
+                        : json_args;
+                    tool_choice |= p.rule("tool-" + name, call(recipient, args));
+                }
             });
 
             auto tool_call  = p.trigger_rule("tool-call", tool_choice);
@@ -149,6 +168,8 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
         data.grammar_triggers = {
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^\\s+to$" },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=functions$" },
+            { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=(?:python|apply_patch)$" },
+            { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=[A-Za-z_][A-Za-z0-9_]*\\." },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "<\\|start\\|>assistant(\\s+to)" },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "<\\|start\\|>assistant(<\\|channel\\|>(?:commentary|analysis)\\s+to)" }
         };

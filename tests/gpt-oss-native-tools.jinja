@@ -1,0 +1,8 @@
+{# Self-contained GPT-OSS fixture for native Harmony recipient parsing. #}
+{%- set channel_token = '<|channel|>' -%}
+{%- for message in messages -%}
+  {{- '<|start|>' + message.role + '<|message|>' + message.content + '<|end|>' -}}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+  {{- '<|start|>assistant' -}}
+{%- endif -%}

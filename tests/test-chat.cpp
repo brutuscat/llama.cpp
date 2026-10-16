@@ -10,6 +10,7 @@
 #include "../tools/server/server-chat.h"
 #include "chat-auto-parser.h"
 #include "chat.h"
+#include "chat-peg-parser.h"
 #include "common.h"
 #include "ggml.h"
 #include "log.h"
@@ -1379,12 +1380,13 @@ static void test_peg_parser(common_chat_templates *                      tmpls,
         // start of the model output (i.e. tc.input).
         std::string constrained = full_input;
         bool grammar_triggered = false;
-        if (earliest_trigger_pos != std::string::npos) {
+        if (parser.params_.grammar_lazy && earliest_trigger_pos != std::string::npos) {
             auto constrain_from = std::max(earliest_trigger_pos, gen_prompt.size());
             constrained = full_input.substr(constrain_from);
             grammar_triggered = true;
         } else if (!parser.params_.grammar_lazy) {
-            // For non-lazy grammars, the entire input should match
+            // Eager grammars accept the generation prompt before sampling
+            // (common_sampler_init), regardless of any lazy trigger patterns.
             grammar_triggered = true;
         }
 
@@ -2125,6 +2127,140 @@ static void test_lfm2_parser(const std::string & template_path, bool detailed_de
         .expect(simple_assist_msg("", "", "empty_args", "{}"))
         .run();
 
+}
+
+static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
+    auto tst = peg_tester("tests/gpt-oss-native-tools.jinja", detailed_debug);
+    const std::string string_schema = R"({"type":"object","properties":{"value":{"type":"string"}},"required":["value"]})";
+    for (const auto & name : { "browser.search", "browser.open", "browser.find", "container.exec",
+                               "repo_browser.print_tree", "repo_browser.search", "repo_browser.open_file", "normal_tool" }) {
+        const common_chat_tool tool{ name, "Test tool", string_schema };
+        const auto recipient = std::string(name).find('.') == std::string::npos
+            ? "functions." + std::string(name) : std::string(name);
+        for (const auto & header : { " to=" + recipient + "<|channel|>analysis",
+                                     "<|channel|>commentary to=" + recipient }) {
+            tst.test(header + "<|message|>{\"value\":\"ok\"}")
+                .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+                .tools({ tool })
+                .expect_tool_calls({ { name, R"({"value":"ok"})", {} } })
+                .run();
+        }
+        if (std::string(name).find('.') != std::string::npos) {
+            tst.test(" to=functions." + std::string(name) + "<|channel|>analysis<|message|>{\"value\":\"ok\"}<|call|>")
+                .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+                .tools({ tool })
+                .expect_tool_calls({ { name, R"({"value":"ok"})", {} } })
+                .run();
+        }
+    }
+
+    const common_chat_tool python{
+        "python", "Execute code", R"({"type":"object","properties":{"code":{"type":"string"}},"required":["code"]})"
+    };
+    for (const auto & code : std::vector<std::string>{
+             "print(2 + 2)", "import math\nprint('\xCF\x80', math.pi)", "{'value': 2}",
+             "print('quoted: \\\"')\r\n\t# trailing spaces  \r\n", "", " \n",
+             R"({"code":"this is raw Python content"})" }) {
+        const auto arguments = json({ { "code", code } }).dump();
+        for (const auto & end : { "", "<|call|>" }) {
+            tst.test(" to=python<|channel|>commentary<|message|>" + code + end)
+                .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+                .tools({ python })
+                .expect_tool_calls({ { "python", arguments, {} } })
+                .run();
+        }
+    }
+    tst.test("<|channel|>analysis to=python<|message|>print(3)<|call|>")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tools({ python })
+        .expect_tool_calls({ { "python", R"json({"code":"print(3)"})json", {} } })
+        .run();
+    tst.test(" to=python<|channel|>commentary<|message|>print(3)")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tool_choice(COMMON_CHAT_TOOL_CHOICE_REQUIRED)
+        .tools({ python })
+        .expect_tool_calls({ { "python", R"json({"code":"print(3)"})json", {} } })
+        .run();
+    tst.test(" to=functions.python<|channel|>commentary<|message|>{\"code\":\"print(1)\"}")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tools({ python })
+        .expect_tool_calls({ { "python", R"json({"code":"print(1)"})json", {} } })
+        .run();
+    tst.test(" to=python<|channel|>commentary<|message|>print(1)<|end|>")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tool_choice(COMMON_CHAT_TOOL_CHOICE_NONE)
+        .tools({ python })
+        .expect_tool_calls({})
+        .run();
+
+    const common_chat_tool patch_tool{
+        "apply_patch", "Apply a patch", R"({"type":"object","properties":{"patch":{"type":"string"}},"required":["patch"]})"
+    };
+    const std::string patch = "*** Begin Patch\n*** Add File: example.txt\n+hello\n*** End Patch\n";
+    const auto patch_arguments = json({ { "patch", patch } }).dump();
+    for (const auto & recipient : { "apply_patch", "functions.apply_patch" }) {
+        for (const auto & body : { patch, patch_arguments }) {
+            for (const auto & end : { "", "<|call|>" }) {
+                tst.test(" to=" + std::string(recipient) + "<|channel|>commentary<|message|>" + body + end)
+                    .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+                    .tools({ patch_tool })
+                    .expect_tool_calls({ { "apply_patch", patch_arguments, {} } })
+                    .run();
+            }
+        }
+    }
+
+    // A tool name alone must not change JSON mapping outside GPT-OSS.
+    const auto parser = build_chat_peg_parser([](common_chat_peg_builder & p) {
+        return p.tool(p.tool_open(p.literal("<tool>")) + p.tool_name(p.literal("python")) + p.literal(":") +
+                      p.tool_args(p.json()) + p.tool_close(p.literal("</tool>")));
+    });
+    const auto parsed = common_chat_peg_parse(parser, "<tool>python:{\"code\":\"print(1)\"}</tool>", false, {});
+    assert_equals<size_t>(1, parsed.tool_calls.size());
+    assert_equals(std::string("python"), parsed.tool_calls[0].name);
+    assert_equals(json::parse(R"json({"code":"print(1)"})json").dump(), json::parse(parsed.tool_calls[0].arguments).dump());
+
+    auto fixture_templates = read_templates("tests/gpt-oss-native-tools.jinja");
+    common_chat_templates_inputs restricted_inputs;
+    restricted_inputs.use_jinja = true;
+    restricted_inputs.add_generation_prompt = true;
+    restricted_inputs.messages = { message_user };
+    restricted_inputs.tools = { python };
+    const auto restricted_params = common_chat_templates_apply(fixture_templates.get(), restricted_inputs);
+    bool unknown_rejected = false;
+    try {
+        const auto unknown = common_chat_parse(" to=unregistered.tool<|channel|>commentary<|message|>{}", false, restricted_params);
+        unknown_rejected = unknown.tool_calls.empty();
+    } catch (const std::runtime_error &) {
+        unknown_rejected = true;
+    }
+    assert_equals(true, unknown_rejected);
+
+    auto native_templates = read_templates("examples/gpt-oss-harmony/gpt-oss-native-tools.jinja");
+    common_chat_templates_inputs history_inputs;
+    history_inputs.use_jinja = true;
+    history_inputs.add_generation_prompt = true;
+    history_inputs.chat_template_kwargs["builtin_tools"] = R"(["python","browser","apply_patch"])";
+    history_inputs.tools = { python, patch_tool, { "browser.search", "Search", string_schema },
+                             { "normal_tool", "Ordinary function", string_schema } };
+    history_inputs.messages = common_chat_msgs_parse_oaicompat(json::parse(R"([
+        {"role":"system","content":"FIRST_POLICY"},
+        {"role":"user","content":"Calculate and search."},
+        {"role":"assistant","tool_calls":[{"type":"function","function":{"name":"browser.search","arguments":"{\"value\":\"query\"}"}}]},
+        {"role":"tool","content":"Search result"},
+        {"role":"developer","content":"LATER_POLICY"},
+        {"role":"assistant","tool_calls":[{"type":"function","function":{"name":"python","arguments":"{\"code\":\"print(1)\"}"}}]},
+        {"role":"tool","content":"1"},
+        {"role":"assistant","tool_calls":[{"type":"function","function":{"name":"normal_tool","arguments":"{\"value\":\"done\"}"}}]},
+        {"role":"tool","content":"recorded"}
+    ])"));
+    const auto history = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    assert_contains(history, "to=python<|channel|>commentary<|message|>print(1)<|call|>");
+    assert_contains(history, "<|start|>python to=assistant<|channel|>commentary<|message|>1<|end|>");
+    assert_contains(history, "to=browser.search<|channel|>commentary json<|message|>{");
+    assert_contains(history, "to=functions.normal_tool<|channel|>commentary json<|message|>{");
+    assert_contains(history, "<|start|>developer<|message|>LATER_POLICY<|end|>");
+    assert_equals(true, history.find("FIRST_POLICY") < history.find("LATER_POLICY"));
 }
 
 static void test_template_output_peg_parsers(bool detailed_debug) {
@@ -7671,6 +7807,7 @@ static void test_msg_diffs_compute() {
 int main(int argc, char ** argv) {
     bool detailed_debug    = false;
     bool only_run_filtered = false;
+    bool only_run_native = false;
 
     // Check for --template and --detailed flags
     for (int i = 1; i < argc; i++) {
@@ -7688,6 +7825,20 @@ int main(int argc, char ** argv) {
             g_force_reconstruction_test = true;
             only_run_filtered          = true;
         }
+        if (arg == "--gpt-oss-native-tool-recipients") {
+            only_run_native = true;
+        }
+    }
+
+    if (only_run_native) {
+        try {
+            test_gpt_oss_native_tool_recipients(detailed_debug);
+        } catch (const std::exception & error) {
+            std::cerr << "GPT-OSS native tool test failed: " << error.what() << '\n';
+            return 1;
+        }
+        std::cout << "\n[chat] GPT-OSS native tool recipient tests passed!\n";
+        return 0;
     }
 
     if (only_run_filtered) {
@@ -7741,6 +7892,7 @@ int main(int argc, char ** argv) {
 #endif
     {
         test_msg_diffs_compute();
+        test_gpt_oss_native_tool_recipients(detailed_debug);
         test_msgs_oaicompat_json_conversion();
         test_msg_token_delimiters_split();
         test_tools_oaicompat_json_conversion();
