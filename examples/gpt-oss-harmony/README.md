@@ -11,15 +11,17 @@ The server parses native recipient names, but does not execute browser, Python, 
 - `harmony-native-template.json` is a rendering fixture for browser, container, repo-browser, Python, top-level patch, and ordinary function calls.
 - `run-template-contract.ps1` checks the rendered template with a caller-supplied `test-chat-template` binary.
 
-## Isolated use only
+## Opt-in use
 
-Supply the overlay only to the isolated Harmony `llama-server` instance:
+Supply the overlay to a compatible Harmony `llama-server` instance:
 
 ```powershell
 llama-server --jinja --chat-template-file .\examples\gpt-oss-harmony\gpt-oss-native-tools.jinja <other-isolated-options>
 ```
 
 Native browser, `container.exec`, `repo_browser.*`, bare `python`, and top-level `apply_patch` are declared only when the caller supplies the corresponding `builtin_tools` template argument. Loading this template does not enable an executor. Keep production files and service settings unchanged until a separately approved cutover.
+
+Tool descriptions and schemas come from the caller's API `tools` payload. The template does not choose a citation format, browser provider, call budget, filesystem root or Python runtime. Each adapter must supply those policies in its tool descriptions. Open WebUI supplies its browser citation policy through `browser.search` and retains its line-citation reminders in browser results. Other callers can supply their own citation convention without changing this template.
 
 ## Protocol contract
 

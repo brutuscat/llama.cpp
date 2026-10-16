@@ -57,6 +57,44 @@ if ($firstInstruction -ge $laterDeveloper -or $laterDeveloper -ge $laterSystem) 
 $casePath = Join-Path ([System.IO.Path]::GetTempPath()) ('harmony-template-' + [guid]::NewGuid() + '.json')
 try {
     $case = Get-Content -Raw -LiteralPath $Fixture | ConvertFrom-Json
+    foreach ($tool in $case.tools) {
+        $tool.function.description = 'Caller-supplied tool description.'
+        if ($tool.function.name -eq 'browser.search') {
+            $tool.function.description = 'CALLER_BROWSER_POLICY: cite using [source:line], with no provider-specific assumptions.'
+        }
+        if ($tool.function.name -eq 'python') {
+            $tool.function.description = 'CALLER_PYTHON_POLICY: this executor preserves its own session state.'
+        }
+    }
+    $case.tools += @{
+        type = 'function'
+        function = @{
+            name = 'browser.open'
+            description = 'CALLER_OPEN_SCHEMA'
+            parameters = @{
+                type = 'object'
+                properties = @{
+                    id = @{ type = @('integer', 'string') }
+                    values = @{ type = 'array'; items = @{ type = @('string', 'null') } }
+                }
+                required = @()
+            }
+        }
+    }
+    $case | ConvertTo-Json -Depth 30 | Set-Content -LiteralPath $casePath -Encoding utf8
+    $policyOutput = & $TestBinary --no-common --json $casePath $Template 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "Caller-policy rendering failed: $policyOutput" }
+    foreach ($policy in @('Citation reminder', 'Cite opened pages', 'hard budget', 'configured web provider', 'Jupyter kernel', '/home/user')) {
+        if ($policyOutput.Contains($policy)) { throw "Portable template contains executor policy: $policy" }
+    }
+    foreach ($policy in @('CALLER_BROWSER_POLICY', 'CALLER_PYTHON_POLICY')) {
+        if (-not $policyOutput.Contains($policy)) { throw "Caller policy was lost: $policy" }
+    }
+    foreach ($schema in @('CALLER_OPEN_SCHEMA', 'id?: number | string', 'values?: (string | null)[]')) {
+        if (-not $policyOutput.Contains($schema)) { throw "Caller schema was changed: $schema" }
+    }
+
+    $case = Get-Content -Raw -LiteralPath $Fixture | ConvertFrom-Json
     $case.builtin_tools = @()
     $case.tools = @($case.tools | Where-Object { $_.function.name -in @('python', 'apply_patch', 'normal_tool') })
     $case.messages = @(
