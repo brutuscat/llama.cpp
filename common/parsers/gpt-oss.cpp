@@ -67,10 +67,21 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
     auto has_response_format = !inputs.json_schema.is_null() && inputs.json_schema.is_object();
     auto include_grammar     = has_response_format || (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE);
     auto extract_reasoning   = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
+    const auto builtin_enabled = [&](const std::string & name) {
+        if (!inputs.extra_context.contains("builtin_tools") || !inputs.extra_context.at("builtin_tools").is_array()) {
+            return false;
+        }
+        for (const auto & builtin : inputs.extra_context.at("builtin_tools")) {
+            if (builtin == name) { return true; }
+        }
+        return false;
+    };
+    const bool native_python = builtin_enabled("python");
+    const bool native_patch = builtin_enabled("apply_patch");
 
     foreach_function(inputs.tools, [&](const json & tool) {
         const auto name = tool.at("function").at("name").get<std::string>();
-        if (name == "python" || name == "apply_patch" || name.find('.') != std::string::npos) {
+        if ((name == "python" && native_python) || (name == "apply_patch" && native_patch) || name.find('.') != std::string::npos) {
             data.message_delimiters.add(COMMON_CHAT_ROLE_TOOL, "<|start|>" + name);
         }
     });
@@ -120,7 +131,7 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
 
                 auto constraint = p.optional(p.space() + p.optional(p.literal("<|constrain|>")) + constrain_type);
                 auto json_args = p.tool_args(p.schema(p.json(), "tool-" + name + "-schema", params));
-                auto raw_body = p.until("<|call|>");
+                auto raw_body = p.until("<|call|>", /* preserve_final_prefix = */ true);
                 auto close = p.optional(p.tool_close(p.literal("<|call|>")));
                 auto call = [&](const common_peg_parser & recipient, const common_peg_parser & args) {
                     auto in_role = p.tool(p.tool_open(recipient + channel + constraint + p.literal("<|message|>")) + args + close);
@@ -130,15 +141,15 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
 
                 auto ordinary_name = p.literal(" to=functions.") + p.tool_name(p.literal(name));
                 auto native_name = p.literal(" to=") + p.tool_name(p.literal(name));
-                if (name == "python") {
+                if (name == "python" && native_python) {
                     // Bare Python carries code; functions.python keeps its JSON schema.
                     tool_choice |= p.rule("tool-" + name,
                         call(native_name, p.tool_args_raw(raw_body, "code")) | call(ordinary_name, json_args));
                 } else {
-                    auto recipient = name == "apply_patch" || name.find('.') != std::string::npos
+                    auto recipient = (name == "apply_patch" && native_patch) || name.find('.') != std::string::npos
                         ? p.literal(" to=") + p.optional(p.literal("functions.")) + p.tool_name(p.literal(name))
                         : ordinary_name;
-                    auto args = name == "apply_patch"
+                    auto args = name == "apply_patch" && native_patch
                         ? json_args | p.tool_args_raw(p.literal("*** Begin Patch") + raw_body, "patch")
                         : json_args;
                     tool_choice |= p.rule("tool-" + name, call(recipient, args));
@@ -169,7 +180,7 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^\\s+to$" },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=functions$" },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=(?:python|apply_patch)$" },
-            { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=[A-Za-z_][A-Za-z0-9_]*\\." },
+            { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=[A-Za-z0-9_-]+\\." },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "<\\|start\\|>assistant(\\s+to)" },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "<\\|start\\|>assistant(<\\|channel\\|>(?:commentary|analysis)\\s+to)" }
         };

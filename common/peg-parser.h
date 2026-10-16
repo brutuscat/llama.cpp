@@ -163,6 +163,7 @@ enum common_peg_parse_flags {
     COMMON_PEG_PARSE_FLAG_NONE    = 0,
     COMMON_PEG_PARSE_FLAG_LENIENT = 1 << 0,
     COMMON_PEG_PARSE_FLAG_DEBUG   = 1 << 1,
+    COMMON_PEG_PARSE_FLAG_FINAL   = 1 << 2,
 };
 
 inline common_peg_parse_flags operator|(common_peg_parse_flags a, common_peg_parse_flags b) {
@@ -196,6 +197,7 @@ struct common_peg_parse_context {
 
     bool is_lenient() const { return flags & COMMON_PEG_PARSE_FLAG_LENIENT; }
     bool is_debug() const { return flags & COMMON_PEG_PARSE_FLAG_DEBUG; }
+    bool is_final() const { return flags & COMMON_PEG_PARSE_FLAG_FINAL; }
 };
 
 class common_peg_arena;
@@ -257,6 +259,7 @@ struct common_peg_string_parser {
 
 struct common_peg_until_parser {
     std::vector<std::string> delimiters;
+    bool preserve_final_prefix = false;
 };
 
 struct common_peg_schema_parser {
@@ -448,7 +451,9 @@ class common_peg_parser_builder {
     // Matches all characters until a delimiter is found (delimiter not consumed).
     // Invalid UTF-8 is consumed and recorded on the AST nodes.
     //   S -> (!delim .)*
-    common_peg_parser until(const std::string & delimiter) { return add(common_peg_until_parser{{delimiter}}); }
+    common_peg_parser until(const std::string & delimiter, bool preserve_final_prefix = false) {
+        return add(common_peg_until_parser{{delimiter}, preserve_final_prefix});
+    }
 
     // Matches all characters until one of the delimiters in the list is found (delimiter not consumed).
     //   S -> (!delim .)*

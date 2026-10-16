@@ -25,8 +25,8 @@ Native browser, `container.exec`, `repo_browser.*`, bare `python`, and top-level
 
 - Calls are sequential: one tool call per assistant message.
 - Dotted recipients accept both their native name and the legacy `functions.` prefix.
-- Bare `python` carries raw code and becomes a JSON `code` field at the API boundary. `functions.python` keeps its declared JSON schema. Other models and ordinary functions named `python` are unaffected.
-- Bare `apply_patch` and `functions.apply_patch` accept either a JSON argument object or raw text starting with `*** Begin Patch`; raw text becomes a JSON `patch` field.
+- With `python` in `builtin_tools`, bare `python` carries raw code and becomes a JSON `code` field at the API boundary. `functions.python` keeps its declared JSON schema. Other models and ordinary functions named `python` are unaffected.
+- With `apply_patch` in `builtin_tools`, bare `apply_patch` and `functions.apply_patch` accept either a JSON argument object or raw text starting with `*** Begin Patch`; raw text becomes a JSON `patch` field. Without that capability, only the ordinary `functions.apply_patch` JSON route is available.
 - System/developer instructions and tool results remain in history order. Python retains newlines, Unicode and trailing whitespace.
 - Raw argument streaming emits JSON string prefixes; concatenated deltas must equal the final non-streaming arguments.
 

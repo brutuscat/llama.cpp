@@ -1514,6 +1514,11 @@ class peg_test_builder {
         return *this;
     }
 
+    peg_test_builder & builtin_tools(const std::vector<std::string> & names) {
+        tc_.params.chat_template_kwargs["builtin_tools"] = json(names).dump();
+        return *this;
+    }
+
     peg_test_builder & enable_thinking(bool val) {
         tc_.params.enable_thinking = val;
         return *this;
@@ -2133,7 +2138,7 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
     auto tst = peg_tester("tests/gpt-oss-native-tools.jinja", detailed_debug);
     const std::string string_schema = R"({"type":"object","properties":{"value":{"type":"string"}},"required":["value"]})";
     for (const auto & name : { "browser.search", "browser.open", "browser.find", "container.exec",
-                               "repo_browser.print_tree", "repo_browser.search", "repo_browser.open_file", "normal_tool" }) {
+                               "repo_browser.print_tree", "repo_browser.search", "repo_browser.open_file", "repo-tools.search", "normal_tool" }) {
         const common_chat_tool tool{ name, "Test tool", string_schema };
         const auto recipient = std::string(name).find('.') == std::string::npos
             ? "functions." + std::string(name) : std::string(name);
@@ -2160,12 +2165,13 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
     for (const auto & code : std::vector<std::string>{
              "print(2 + 2)", "import math\nprint('\xCF\x80', math.pi)", "{'value': 2}",
              "print('quoted: \\\"')\r\n\t# trailing spaces  \r\n", "", " \n",
-             R"({"code":"this is raw Python content"})" }) {
+             R"({"code":"this is raw Python content"})", "# <", "# <|", "# <|c", "# <|ca", "# <|cal", "# <|call", "# <|call|" }) {
         const auto arguments = json({ { "code", code } }).dump();
         for (const auto & end : { "", "<|call|>" }) {
             tst.test(" to=python<|channel|>commentary<|message|>" + code + end)
                 .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
                 .tools({ python })
+                .builtin_tools({ "python" })
                 .expect_tool_calls({ { "python", arguments, {} } })
                 .run();
         }
@@ -2173,12 +2179,14 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
     tst.test("<|channel|>analysis to=python<|message|>print(3)<|call|>")
         .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
         .tools({ python })
+        .builtin_tools({ "python" })
         .expect_tool_calls({ { "python", R"json({"code":"print(3)"})json", {} } })
         .run();
     tst.test(" to=python<|channel|>commentary<|message|>print(3)")
         .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
         .tool_choice(COMMON_CHAT_TOOL_CHOICE_REQUIRED)
         .tools({ python })
+        .builtin_tools({ "python" })
         .expect_tool_calls({ { "python", R"json({"code":"print(3)"})json", {} } })
         .run();
     tst.test(" to=functions.python<|channel|>commentary<|message|>{\"code\":\"print(1)\"}")
@@ -2204,6 +2212,7 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
                 tst.test(" to=" + std::string(recipient) + "<|channel|>commentary<|message|>" + body + end)
                     .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
                     .tools({ patch_tool })
+                    .builtin_tools({ "apply_patch" })
                     .expect_tool_calls({ { "apply_patch", patch_arguments, {} } })
                     .run();
             }
@@ -2235,6 +2244,53 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
         unknown_rejected = true;
     }
     assert_equals(true, unknown_rejected);
+
+    // Lazy grammar sees generated text, not the assistant prefill from the template.
+    for (const auto & name : { "repo-tools.search", "3repo.search" }) {
+        restricted_inputs.tools = { { name, "Dotted function", string_schema } };
+        const auto params = common_chat_templates_apply(fixture_templates.get(), restricted_inputs);
+        assert_equals(true, params.grammar_lazy);
+        for (const auto & channel : { "analysis", "commentary" }) {
+            const std::string header = "<|channel|>" + std::string(channel) + " to=" + name;
+            bool triggered = false;
+            for (size_t length = 1; length <= header.size(); ++length) {
+                for (const auto & trigger : params.grammar_triggers) {
+                    if (trigger.type == COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN &&
+                            std::regex_search(header.substr(0, length), std::regex(trigger.value))) {
+                        triggered = true;
+                    }
+                }
+            }
+            if (!triggered) { throw std::runtime_error("No lazy grammar trigger for generated header: " + header); }
+        }
+    }
+
+    for (const auto & name : { "python", "apply_patch" }) {
+        const common_chat_tool ordinary{ name, "Ordinary function", string_schema };
+        tst.test(" to=functions." + std::string(name) + "<|channel|>commentary<|message|>{\"value\":\"ok\"}")
+            .tools({ ordinary })
+            .expect_tool_calls({ { name, R"({"value":"ok"})", {} } })
+            .run();
+        for (const auto & capabilities : { "", "[]", "[\"browser\"]" }) {
+            restricted_inputs.tools = { ordinary };
+            restricted_inputs.chat_template_kwargs.clear();
+            if (capabilities[0]) {
+                restricted_inputs.chat_template_kwargs["builtin_tools"] = capabilities;
+            }
+            const auto params = common_chat_templates_apply(fixture_templates.get(), restricted_inputs);
+            for (const auto & recipient : { std::string(name), "functions." + std::string(name) }) {
+                if (recipient == "functions.python") { continue; }
+                const std::string raw = std::string(name) == "python" ? "print(1)" : patch;
+                bool rejected = false;
+                try {
+                    rejected = common_chat_parse(" to=" + recipient + "<|channel|>commentary<|message|>" + raw, false, params).tool_calls.empty();
+                } catch (const std::runtime_error &) {
+                    rejected = true;
+                }
+                assert_equals(true, rejected);
+            }
+        }
+    }
 
     auto native_templates = read_templates("examples/gpt-oss-harmony/gpt-oss-native-tools.jinja");
     common_chat_templates_inputs history_inputs;
