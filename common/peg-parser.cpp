@@ -716,8 +716,9 @@ struct parser_executor {
             }
 
             if (match == common_trie::PARTIAL_MATCH) {
-                // Found a partial match extending to end of input, return everything before it
-                return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_SUCCESS, start_pos, pos, {}, std::move(invalid_utf8));
+                // Hold a possible delimiter while streaming; retain literal suffixes at final EOF when requested.
+                const auto end = p.preserve_final_prefix && ctx.is_final() ? ctx.input.size() : pos;
+                return common_peg_parse_result(COMMON_PEG_PARSE_RESULT_SUCCESS, start_pos, end, {}, std::move(invalid_utf8));
             }
 
             pos += utf8_result.bytes_consumed;
@@ -1863,7 +1864,9 @@ static common_json serialize_parser_variant(const common_peg_parser_variant & va
         } else if constexpr (std::is_same_v<T, common_peg_string_parser>) {
             return json{{"type", "string"}, {"delimiter", std::string(1, p.delimiter)}};
         } else if constexpr (std::is_same_v<T, common_peg_until_parser>) {
-            return json{{"type", "until"}, {"delimiters", p.delimiters}};
+            auto result = json{{"type", "until"}, {"delimiters", p.delimiters}};
+            if (p.preserve_final_prefix) { result["preserve_final_prefix"] = true; }
+            return result;
         } else if constexpr (std::is_same_v<T, common_peg_schema_parser>) {
             return json{
                 {"type", "schema"},
@@ -2005,7 +2008,7 @@ static common_peg_parser_variant deserialize_parser_variant(const common_json & 
         if (!j.contains("delimiters") || !j["delimiters"].is_array()) {
             throw std::runtime_error("until parser missing or invalid 'delimiters' field");
         }
-        return common_peg_until_parser{j["delimiters"].get<std::vector<std::string>>()};
+        return common_peg_until_parser{j["delimiters"].get<std::vector<std::string>>(), j.value("preserve_final_prefix", false)};
     }
     if (type == "schema") {
         if (!j.contains("child") || !j.contains("name") || !j.contains("raw")) {

@@ -1469,6 +1469,9 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
     //LOG_DBG("Parsing PEG input with format %s: %s\n", common_chat_format_name(params.format), effective_input.c_str());
 
     common_peg_parse_flags flags = COMMON_PEG_PARSE_FLAG_LENIENT;
+    if (!is_partial) {
+        flags |= COMMON_PEG_PARSE_FLAG_FINAL;
+    }
     if (params.debug) {
         flags |= COMMON_PEG_PARSE_FLAG_DEBUG;
     }
@@ -1489,7 +1492,7 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
             } else if (params.format == COMMON_CHAT_FORMAT_PEG_MINIMAX_M3) {
                 mapper = std::make_unique<common_chat_peg_minimax_m3_mapper>(msg);
             } else {
-                mapper = std::make_unique<common_chat_peg_mapper>(msg);
+                mapper = std::make_unique<common_chat_peg_mapper>(msg, is_partial);
             }
             mapper->from_ast(ctx.ast, result);
 
@@ -1513,7 +1516,7 @@ common_chat_msg common_chat_peg_parse(const common_peg_arena &          src_pars
     } else if (params.format == COMMON_CHAT_FORMAT_PEG_MINIMAX_M3) {
         mapper = std::make_unique<common_chat_peg_minimax_m3_mapper>(msg);
     } else {
-        mapper = std::make_unique<common_chat_peg_mapper>(msg);
+        mapper = std::make_unique<common_chat_peg_mapper>(msg, is_partial);
     }
     mapper->from_ast(ctx.ast, result);
 

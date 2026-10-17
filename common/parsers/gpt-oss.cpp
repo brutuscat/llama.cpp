@@ -1,8 +1,21 @@
 #include "parsers.h"
 
+#include <unordered_set>
+
 common_chat_params common_chat_params_init_gpt_oss(const common_chat_template &    tmpl,
                                                           const autoparser::generation_params & inputs) {
     common_chat_params data;
+
+    std::unordered_set<std::string> tool_names;
+    foreach_function(inputs.tools, [&](const json & tool) {
+        tool_names.insert(tool.at("function").at("name").get<std::string>());
+    });
+    foreach_function(inputs.tools, [&](const json & tool) {
+        const auto name = tool.at("function").at("name").get<std::string>();
+        if (name.compare(0, 10, "functions.") == 0 && tool_names.count(name.substr(10))) {
+            throw std::invalid_argument("Ambiguous GPT-OSS recipient " + name + " for tools " + name.substr(10) + " and " + name);
+        }
+    });
 
     // Copy reasoning to the "thinking" field as expected by the gpt-oss template
     auto adjusted_messages = json::array();
@@ -31,14 +44,6 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
 
     data.prompt            = prompt;
     data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs, /* messages_override= */ adjusted_messages);
-    data.message_delimiters = {
-        { COMMON_CHAT_ROLE_ASSISTANT, "<|start|>assistant" },
-        { COMMON_CHAT_ROLE_USER,      "<|start|>user"      },
-        { COMMON_CHAT_ROLE_SYSTEM,    "<|start|>developer" },
-        { COMMON_CHAT_ROLE_SYSTEM,    "<|start|>system"    },
-        { COMMON_CHAT_ROLE_TOOL,      "<|start|>functions" },
-    };
-
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking = true;
 
@@ -67,6 +72,32 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
     auto has_response_format = !inputs.json_schema.is_null() && inputs.json_schema.is_object();
     auto include_grammar     = has_response_format || (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE);
     auto extract_reasoning   = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE;
+    const auto builtin_enabled = [&](const std::string & name) {
+        if (!inputs.extra_context.contains("builtin_tools") || !inputs.extra_context.at("builtin_tools").is_array()) {
+            return false;
+        }
+        for (const auto & builtin : inputs.extra_context.at("builtin_tools")) {
+            if (builtin == name) { return true; }
+        }
+        return false;
+    };
+    const bool native_python = builtin_enabled("python");
+    const bool native_patch = builtin_enabled("apply_patch");
+
+    foreach_function(inputs.tools, [&](const json & tool) {
+        const auto name = tool.at("function").at("name").get<std::string>();
+        if ((name == "python" && native_python) || (name == "apply_patch" && native_patch) || name.find('.') != std::string::npos) {
+            data.message_delimiters.add(COMMON_CHAT_ROLE_TOOL, "<|start|>" + name);
+        }
+    });
+    // Native recipients must precede shorter role prefixes such as user in user.lookup.
+    data.message_delimiters.delimiters.insert(data.message_delimiters.delimiters.end(), {
+        { COMMON_CHAT_ROLE_ASSISTANT, "<|start|>assistant" },
+        { COMMON_CHAT_ROLE_USER,      "<|start|>user"      },
+        { COMMON_CHAT_ROLE_SYSTEM,    "<|start|>developer" },
+        { COMMON_CHAT_ROLE_SYSTEM,    "<|start|>system"    },
+        { COMMON_CHAT_ROLE_TOOL,      "<|start|>functions" },
+    });
 
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {
         auto start           = p.rule("start", p.literal("<|start|>assistant"));
@@ -105,25 +136,40 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
 
         if (has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE) {
             auto tool_choice = p.choice();
+            size_t tool_index = 0;
 
             foreach_function(inputs.tools, [&](const json & tool) {
                 const auto & function = tool.at("function");
                 std::string  name     = function.at("name");
                 const auto   params   = common_chat_tool_parameters(function);
+                const auto rule_name = "tool-" + std::to_string(tool_index++);
 
-                auto func_name  = p.literal(" to=functions.") + p.tool_name(p.literal(name));
                 auto constraint = p.optional(p.space() + p.optional(p.literal("<|constrain|>")) + constrain_type);
-                auto args       = p.tool_args(p.schema(p.json(), "tool-" + name + "-schema", params));
+                auto json_args = p.tool_args(p.schema(p.json(), rule_name + "-schema", params));
+                auto raw_body = p.until("<|call|>", /* preserve_final_prefix = */ true);
+                auto close = p.optional(p.tool_close(p.literal("<|call|>")));
+                auto call = [&](const common_peg_parser & recipient, const common_peg_parser & args) {
+                    auto in_role = p.tool(p.tool_open(recipient + channel + constraint + p.literal("<|message|>")) + args + close);
+                    auto in_channel = p.tool(p.tool_open(channel + recipient + constraint + p.literal("<|message|>")) + args + close);
+                    return in_role | in_channel;
+                };
 
-                // recipient in role header
-                //   <|start|>assistant to=functions.NAME<|channel|>(commentary|analysis)[constraint]<|message|>ARGS
-                auto tool_in_role = p.tool(p.tool_open(func_name + channel + constraint + p.literal("<|message|>")) + args);
-
-                // recipient in channel header
-                //   <|channel|>(commentary|analysis) to=functions.NAME[constraint]<|message|>ARGS
-                auto tool_in_channel = p.tool(p.tool_open(channel + func_name + constraint + p.literal("<|message|>")) + args);
-
-                tool_choice |= p.rule("tool-" + name, tool_in_role | tool_in_channel);
+                auto ordinary_name = p.literal(" to=functions.") + p.tool_name(p.literal(name));
+                auto native_name = p.literal(" to=") + p.tool_name(p.literal(name));
+                if (name == "python" && native_python) {
+                    // Bare Python carries code; functions.python keeps its JSON schema.
+                    tool_choice |= p.rule(rule_name,
+                        call(native_name, p.tool_args_raw(raw_body, "code")) | call(ordinary_name, json_args));
+                } else {
+                    auto args = name == "apply_patch" && native_patch
+                        ? json_args | p.tool_args_raw(p.literal("*** Begin Patch") + raw_body, "patch")
+                        : json_args;
+                    auto alternatives = call(ordinary_name, args);
+                    if ((name == "apply_patch" && native_patch) || name.find('.') != std::string::npos) {
+                        alternatives = call(native_name, args) | alternatives;
+                    }
+                    tool_choice |= p.rule(rule_name, alternatives);
+                }
             });
 
             auto tool_call  = p.trigger_rule("tool-call", tool_choice);
@@ -149,6 +195,8 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
         data.grammar_triggers = {
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^\\s+to$" },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=functions$" },
+            { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=(?:python|apply_patch)$" },
+            { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "^<\\|channel\\|>(?:commentary|analysis)\\s+to=[A-Za-z0-9_-]+\\." },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "<\\|start\\|>assistant(\\s+to)" },
             { COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN, "<\\|start\\|>assistant(<\\|channel\\|>(?:commentary|analysis)\\s+to)" }
         };

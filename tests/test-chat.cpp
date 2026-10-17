@@ -10,9 +10,11 @@
 #include "../tools/server/server-chat.h"
 #include "chat-auto-parser.h"
 #include "chat.h"
+#include "chat-peg-parser.h"
 #include "common.h"
 #include "ggml.h"
 #include "log.h"
+#include "parsers/parsers.h"
 
 #include <algorithm>
 #include <exception>
@@ -1379,12 +1381,13 @@ static void test_peg_parser(common_chat_templates *                      tmpls,
         // start of the model output (i.e. tc.input).
         std::string constrained = full_input;
         bool grammar_triggered = false;
-        if (earliest_trigger_pos != std::string::npos) {
+        if (parser.params_.grammar_lazy && earliest_trigger_pos != std::string::npos) {
             auto constrain_from = std::max(earliest_trigger_pos, gen_prompt.size());
             constrained = full_input.substr(constrain_from);
             grammar_triggered = true;
         } else if (!parser.params_.grammar_lazy) {
-            // For non-lazy grammars, the entire input should match
+            // Eager grammars accept the generation prompt before sampling
+            // (common_sampler_init), regardless of any lazy trigger patterns.
             grammar_triggered = true;
         }
 
@@ -1509,6 +1512,11 @@ class peg_test_builder {
 
     peg_test_builder & tools(std::vector<common_chat_tool> tools) {
         tc_.params.tools = std::move(tools);
+        return *this;
+    }
+
+    peg_test_builder & builtin_tools(const std::vector<std::string> & names) {
+        tc_.params.chat_template_kwargs["builtin_tools"] = json(names).dump();
         return *this;
     }
 
@@ -2125,6 +2133,523 @@ static void test_lfm2_parser(const std::string & template_path, bool detailed_de
         .expect(simple_assist_msg("", "", "empty_args", "{}"))
         .run();
 
+}
+
+static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
+    auto tst = peg_tester("tests/gpt-oss-native-tools.jinja", detailed_debug);
+    const std::string string_schema = R"({"type":"object","properties":{"value":{"type":"string"}},"required":["value"]})";
+    for (const auto & name : { "browser.search", "browser.open", "browser.find", "container.exec",
+                               "repo_browser.print_tree", "repo_browser.search", "repo_browser.open_file", "repo-tools.search",
+                               "functions.foo", "functions.functions", "normal_tool" }) {
+        const common_chat_tool tool{ name, "Test tool", string_schema };
+        const auto recipient = std::string(name).find('.') == std::string::npos
+            ? "functions." + std::string(name) : std::string(name);
+        for (const auto & header : { " to=" + recipient + "<|channel|>analysis",
+                                     "<|channel|>commentary to=" + recipient }) {
+            tst.test(header + "<|message|>{\"value\":\"ok\"}")
+                .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+                .tools({ tool })
+                .expect_tool_calls({ { name, R"({"value":"ok"})", {} } })
+                .run();
+        }
+        if (std::string(name).find('.') != std::string::npos) {
+            tst.test(" to=functions." + std::string(name) + "<|channel|>analysis<|message|>{\"value\":\"ok\"}<|call|>")
+                .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+                .tools({ tool })
+                .expect_tool_calls({ { name, R"({"value":"ok"})", {} } })
+                .run();
+        }
+    }
+
+    const common_chat_tool python{
+        "python", "Execute code", R"({"type":"object","properties":{"code":{"type":"string"}},"required":["code"]})"
+    };
+    for (const auto & code : std::vector<std::string>{
+             "print(2 + 2)", "import math\nprint('\xCF\x80', math.pi)", "{'value': 2}",
+             "print('quoted: \\\"')\r\n\t# trailing spaces  \r\n", "", " \n",
+             R"({"code":"this is raw Python content"})", "# <", "# <|", "# <|c", "# <|ca", "# <|cal", "# <|call", "# <|call|" }) {
+        const auto arguments = json({ { "code", code } }).dump();
+        for (const auto & end : { "", "<|call|>" }) {
+            tst.test(" to=python<|channel|>commentary<|message|>" + code + end)
+                .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+                .tools({ python })
+                .builtin_tools({ "python" })
+                .expect_tool_calls({ { "python", arguments, {} } })
+                .run();
+        }
+    }
+    tst.test("<|channel|>analysis to=python<|message|>print(3)<|call|>")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tools({ python })
+        .builtin_tools({ "python" })
+        .expect_tool_calls({ { "python", R"json({"code":"print(3)"})json", {} } })
+        .run();
+    tst.test(" to=python<|channel|>commentary<|message|>print(3)")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tool_choice(COMMON_CHAT_TOOL_CHOICE_REQUIRED)
+        .tools({ python })
+        .builtin_tools({ "python" })
+        .expect_tool_calls({ { "python", R"json({"code":"print(3)"})json", {} } })
+        .run();
+    tst.test(" to=functions.python<|channel|>commentary<|message|>{\"code\":\"print(1)\"}")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tools({ python })
+        .expect_tool_calls({ { "python", R"json({"code":"print(1)"})json", {} } })
+        .run();
+    tst.test(" to=python<|channel|>commentary<|message|>print(1)<|end|>")
+        .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+        .tool_choice(COMMON_CHAT_TOOL_CHOICE_NONE)
+        .tools({ python })
+        .expect_tool_calls({})
+        .run();
+
+    const common_chat_tool patch_tool{
+        "apply_patch", "Apply a patch", R"({"type":"object","properties":{"patch":{"type":"string"}},"required":["patch"]})"
+    };
+    const std::string patch = "*** Begin Patch\n*** Add File: example.txt\n+hello\n*** End Patch\n";
+    const auto patch_arguments = json({ { "patch", patch } }).dump();
+    for (const auto & recipient : { "apply_patch", "functions.apply_patch" }) {
+        for (const auto & body : { patch, patch_arguments }) {
+            for (const auto & end : { "", "<|call|>" }) {
+                tst.test(" to=" + std::string(recipient) + "<|channel|>commentary<|message|>" + body + end)
+                    .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+                    .tools({ patch_tool })
+                    .builtin_tools({ "apply_patch" })
+                    .expect_tool_calls({ { "apply_patch", patch_arguments, {} } })
+                    .run();
+            }
+        }
+    }
+
+    // A tool name alone must not change JSON mapping outside GPT-OSS.
+    const auto parser = build_chat_peg_parser([](common_chat_peg_builder & p) {
+        return p.tool(p.tool_open(p.literal("<tool>")) + p.tool_name(p.literal("python")) + p.literal(":") +
+                      p.tool_args(p.json()) + p.tool_close(p.literal("</tool>")));
+    });
+    const auto parsed = common_chat_peg_parse(parser, "<tool>python:{\"code\":\"print(1)\"}</tool>", false, {});
+    assert_equals<size_t>(1, parsed.tool_calls.size());
+    assert_equals(std::string("python"), parsed.tool_calls[0].name);
+    assert_equals(json::parse(R"json({"code":"print(1)"})json").dump(), json::parse(parsed.tool_calls[0].arguments).dump());
+
+    auto fixture_templates = read_templates("tests/gpt-oss-native-tools.jinja");
+    common_chat_templates_inputs restricted_inputs;
+    restricted_inputs.use_jinja = true;
+    restricted_inputs.add_generation_prompt = true;
+    restricted_inputs.messages = { message_user };
+    restricted_inputs.tools = { python };
+    const auto restricted_params = common_chat_templates_apply(fixture_templates.get(), restricted_inputs);
+    bool unknown_rejected = false;
+    try {
+        const auto unknown = common_chat_parse(" to=unregistered.tool<|channel|>commentary<|message|>{}", false, restricted_params);
+        unknown_rejected = unknown.tool_calls.empty();
+    } catch (const std::runtime_error &) {
+        unknown_rejected = true;
+    }
+    assert_equals(true, unknown_rejected);
+
+    // Lazy grammar sees generated text, not the assistant prefill from the template.
+    for (const auto & name : { "repo-tools.search", "3repo.search" }) {
+        restricted_inputs.tools = { { name, "Dotted function", string_schema } };
+        const auto params = common_chat_templates_apply(fixture_templates.get(), restricted_inputs);
+        assert_equals(true, params.grammar_lazy);
+        for (const auto & channel : { "analysis", "commentary" }) {
+            const std::string header = "<|channel|>" + std::string(channel) + " to=" + name;
+            bool triggered = false;
+            for (size_t length = 1; length <= header.size(); ++length) {
+                for (const auto & trigger : params.grammar_triggers) {
+                    if (trigger.type == COMMON_GRAMMAR_TRIGGER_TYPE_PATTERN &&
+                            std::regex_search(header.substr(0, length), std::regex(trigger.value))) {
+                        triggered = true;
+                    }
+                }
+            }
+            if (!triggered) { throw std::runtime_error("No lazy grammar trigger for generated header: " + header); }
+        }
+    }
+
+    for (const auto & name : { "python", "apply_patch" }) {
+        const common_chat_tool ordinary{ name, "Ordinary function", string_schema };
+        tst.test(" to=functions." + std::string(name) + "<|channel|>commentary<|message|>{\"value\":\"ok\"}")
+            .tools({ ordinary })
+            .expect_tool_calls({ { name, R"({"value":"ok"})", {} } })
+            .run();
+        for (const auto & capabilities : { "", "[]", "[\"browser\"]" }) {
+            restricted_inputs.tools = { ordinary };
+            restricted_inputs.chat_template_kwargs.clear();
+            if (capabilities[0]) {
+                restricted_inputs.chat_template_kwargs["builtin_tools"] = capabilities;
+            }
+            const auto params = common_chat_templates_apply(fixture_templates.get(), restricted_inputs);
+            for (const auto & recipient : { std::string(name), "functions." + std::string(name) }) {
+                if (recipient == "functions.python") { continue; }
+                const std::string raw = std::string(name) == "python" ? "print(1)" : patch;
+                bool rejected = false;
+                try {
+                    rejected = common_chat_parse(" to=" + recipient + "<|channel|>commentary<|message|>" + raw, false, params).tool_calls.empty();
+                } catch (const std::runtime_error &) {
+                    rejected = true;
+                }
+                assert_equals(true, rejected);
+            }
+        }
+    }
+
+    auto native_templates = read_templates("examples/gpt-oss-harmony/gpt-oss-native-tools.jinja");
+    common_chat_templates_inputs history_inputs;
+    history_inputs.use_jinja = true;
+    history_inputs.add_generation_prompt = true;
+    history_inputs.chat_template_kwargs["builtin_tools"] = R"(["python","browser","apply_patch"])";
+    history_inputs.tools = { python, patch_tool, { "browser.search", "Search", string_schema },
+                             { "normal_tool", "Ordinary function", string_schema } };
+    history_inputs.messages = common_chat_msgs_parse_oaicompat(json::parse(R"([
+        {"role":"system","content":"FIRST_POLICY"},
+        {"role":"user","content":"Calculate and search."},
+        {"role":"assistant","tool_calls":[{"type":"function","function":{"name":"browser.search","arguments":"{\"value\":\"query\"}"}}]},
+        {"role":"tool","content":"Search result"},
+        {"role":"developer","content":"LATER_POLICY"},
+        {"role":"assistant","tool_calls":[{"type":"function","function":{"name":"python","arguments":"{\"code\":\"print(1)\"}"}}]},
+        {"role":"tool","content":"1"},
+        {"role":"assistant","tool_calls":[{"type":"function","function":{"name":"normal_tool","arguments":"{\"value\":\"done\"}"}}]},
+        {"role":"tool","content":"recorded"}
+    ])"));
+    const auto history = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    assert_contains(history, "to=python<|channel|>commentary<|message|>print(1)<|call|>");
+    assert_contains(history, "<|start|>python to=assistant<|channel|>commentary<|message|>1<|end|>");
+    assert_contains(history, "to=browser.search<|channel|>commentary json<|message|>{");
+    assert_contains(history, "to=functions.normal_tool<|channel|>commentary json<|message|>{");
+    assert_contains(history, "<|start|>developer<|message|>LATER_POLICY<|end|>");
+    assert_equals(true, history.find("FIRST_POLICY") < history.find("LATER_POLICY"));
+    assert_contains(history, "type search =");
+    assert_equals(std::string::npos, history.find("type open ="));
+    assert_equals(std::string::npos, history.find("type find ="));
+    history_inputs.tools.push_back({ "browser.open", "Open", string_schema });
+    history_inputs.tools.push_back({ "browser.find", "Find", string_schema });
+    const auto all_browser_tools = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    assert_contains(all_browser_tools, "type search =");
+    assert_contains(all_browser_tools, "type open =");
+    assert_contains(all_browser_tools, "type find =");
+    history_inputs.tools.push_back({ "array_schema_tool", "Array schema rendering", R"({
+        "type":"object","properties":{
+            "unconstrained":{"type":"array"},
+            "nullable":{"type":["array","null"],"items":{"type":"string"}},
+            "nullable_unconstrained":{"type":["null","array"]},
+            "nested":{"type":"array","items":{"type":["array","null"],"items":{"type":"integer"}}}
+        }
+    })" });
+    const auto array_types = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    assert_contains(array_types, "unconstrained?: any[]");
+    assert_contains(array_types, "nullable?: string[] | null");
+    assert_contains(array_types, "nullable_unconstrained?: null | any[]");
+    assert_contains(array_types, "nested?: (number[] | null)[]");
+
+    history_inputs.tools.push_back({ "schema_tool", "Structured parameters", R"({
+        "type":"object","properties":{
+            "file-path":{"type":"string"},
+            "x value":{"type":"integer"},
+            "quote\"key":{"type":"boolean"},
+            "9key":{"type":"string"},
+            "$safe_key9":{"type":"string"},
+            "config":{"type":["object","null"],"properties":{
+                "path":{"type":"string"},
+                "mode":{"type":"integer"},
+                "nested":{"type":"object","properties":{"child-key":{"type":"boolean"}},"required":["child-key"]}
+            },"required":["path","mode"]},
+            "records":{"type":"array","items":{"type":"object","properties":{"record-id":{"type":"string"}},"required":["record-id"]}}
+        },"required":["file-path","config"]
+    })" });
+    const auto structured_types = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    const bool quoted_keys = structured_types.find("\"file-path\": string") != std::string::npos &&
+        structured_types.find("\"x value\"?: number") != std::string::npos &&
+        structured_types.find("\"quote\\\"key\"?: boolean") != std::string::npos &&
+        structured_types.find("\"9key\"?: string") != std::string::npos &&
+        structured_types.find("$safe_key9?: string") != std::string::npos;
+    const bool nested_objects = structured_types.find("config: {\npath: string,\nmode: number,\nnested?: {\n\"child-key\": boolean,\n},\n} | null") != std::string::npos &&
+        structured_types.find("records?: {\n\"record-id\": string,\n}[]") != std::string::npos;
+    if (!quoted_keys || !nested_objects) {
+        throw std::runtime_error("Structured schema regression: quoted_keys=" + std::to_string(quoted_keys) +
+                                 ", nested_objects=" + std::to_string(nested_objects));
+    }
+
+    for (const bool use_content : { false, true }) {
+        history_inputs.messages = common_chat_msgs_parse_oaicompat(json::parse(R"([
+            {"role":"user","content":"Search."},
+            {"role":"assistant","tool_calls":[{"type":"function","function":{"name":"browser.search","arguments":"{\"value\":\"query\"}"}}]},
+            {"role":"tool","content":"Search result"}
+        ])"));
+        auto & call_message = history_inputs.messages[1];
+        (use_content ? call_message.content : call_message.reasoning_content) = "ACTIVE_TOOL_REASONING";
+        const auto active = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+        assert_contains(active, "<|channel|>analysis<|message|>ACTIVE_TOOL_REASONING<|end|>");
+        auto next_call = call_message;
+        history_inputs.messages.push_back({ "assistant", "FINAL_ANSWER" });
+        history_inputs.messages.push_back({ "user", "Next question." });
+        const auto completed = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+        assert_equals(std::string::npos, completed.find("ACTIVE_TOOL_REASONING"));
+        assert_contains(completed, "<|channel|>final<|message|>FINAL_ANSWER<|end|>");
+        assert_contains(completed, "to=browser.search<|channel|>commentary json<|message|>{");
+        assert_contains(completed, "<|start|>browser.search to=assistant<|channel|>commentary<|message|>Search result<|end|>");
+        (use_content ? next_call.content : next_call.reasoning_content) = "NEXT_TOOL_REASONING";
+        history_inputs.messages.push_back(next_call);
+        history_inputs.messages.push_back({ "tool", "Next result" });
+        const auto resumed = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+        assert_equals(std::string::npos, resumed.find("ACTIVE_TOOL_REASONING"));
+        assert_contains(resumed, "<|channel|>analysis<|message|>NEXT_TOOL_REASONING<|end|>");
+    }
+
+    history_inputs.tools.push_back({ "choice_tool", "Schema choices", R"({
+        "type":"object","properties":{
+            "mode":{"type":"string","description":"Choose the operation.\nKeep the source unchanged.","enum":["read","write"]},
+            "flag":{"const":false},
+            "nothing":{"const":null},
+            "number":{"enum":[0,2]},
+            "variant":{"oneOf":[{"type":"string"},{"type":"object","properties":{"kind":{"const":"file","description":"Select a file."}},"required":["kind"]}]},
+            "optional":{"anyOf":[{"type":"integer"},{"type":"null"}]},
+            "typed":{"type":"string","anyOf":[{"const":"a"},{"const":"b"}]},
+            "items":{"type":"array","items":{"enum":["a","b"]}}
+        }
+    })" });
+    const auto choices = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    const bool descriptions = choices.find("// Choose the operation.\n// Keep the source unchanged.\nmode?:") != std::string::npos &&
+        choices.find("// Select a file.\nkind:") != std::string::npos;
+    const bool constraints = choices.find("mode?: \"read\" | \"write\"") != std::string::npos &&
+        choices.find("flag?: false") != std::string::npos && choices.find("nothing?: null") != std::string::npos &&
+        choices.find("number?: 0 | 2") != std::string::npos &&
+        choices.find("variant?: (string | {\n// Select a file.\nkind: \"file\",\n})") != std::string::npos &&
+        choices.find("optional?: (number | null)") != std::string::npos &&
+        choices.find("typed?: (\"a\" | \"b\")") != std::string::npos &&
+        choices.find("items?: (\"a\" | \"b\")[]") != std::string::npos;
+    if (!descriptions || !constraints) {
+        throw std::runtime_error("Schema choices regression: descriptions=" + std::to_string(descriptions) +
+                                 ", constraints=" + std::to_string(constraints));
+    }
+
+    history_inputs.tools.push_back({ "default_tool", "Parameter defaults", R"({
+        "type":"object","properties":{
+            "enabled":{"type":"boolean","default":false},
+            "count":{"type":"integer","default":0},
+            "name":{"type":"string","default":""},
+            "value":{"type":["string","null"],"default":null},
+            "nested":{"type":"object","properties":{
+                "mode":{"type":"string","description":"Use this mode when omitted.","default":"read\n\"only\""}
+            }}
+        }
+    })" });
+    const auto defaults = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    assert_contains(defaults, "// default: false\nenabled?: boolean");
+    assert_contains(defaults, "// default: 0\ncount?: number");
+    assert_contains(defaults, "// default: \"\"\nname?: string");
+    assert_contains(defaults, "// default: null\nvalue?: string | null");
+    assert_contains(defaults, "// Use this mode when omitted.\n// default: \"read\\n\\\"only\\\"\"\nmode?: string");
+
+    history_inputs.tools.push_back({ "typeless_tool", "Structural schemas", R"({
+        "type":"object","properties":{
+            "config":{"properties":{"path":{"type":"string"}},"required":["path"]},
+            "values":{"items":{"type":"integer"}},
+            "anything":{},
+            "free":{"additionalProperties":true},
+            "closed":{"additionalProperties":false},
+            "text":{"minLength":1},
+            "empty_object":{"properties":{}}
+        }
+    })" });
+    const auto typeless = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    assert_contains(typeless, "config?: {\npath: string,\n}");
+    assert_contains(typeless, "values?: number[]");
+    assert_contains(typeless, "anything?: any");
+    assert_contains(typeless, "free?: any");
+    assert_contains(typeless, "closed?: object");
+    assert_contains(typeless, "text?: string");
+    assert_contains(typeless, "empty_object?: object");
+
+    auto python_history_inputs = history_inputs;
+    python_history_inputs.tools = { { "python", "Ordinary Python function", string_schema } };
+    python_history_inputs.messages = common_chat_msgs_parse_oaicompat(json::parse(R"([
+        {"role":"user","content":"Call the function."},
+        {"role":"assistant","tool_calls":[{"type":"function","function":{"name":"python","arguments":"{\"value\":\"keep me\"}"}}]},
+        {"role":"tool","content":"Recorded"}
+    ])"));
+    const auto ordinary_python = common_chat_templates_apply(native_templates.get(), python_history_inputs).prompt;
+    assert_contains(ordinary_python, "to=functions.python<|channel|>commentary json<|message|>{");
+    assert_contains(ordinary_python, "keep me");
+    assert_contains(ordinary_python, "<|start|>functions.python to=assistant<|channel|>commentary<|message|>Recorded<|end|>");
+    python_history_inputs.messages[1].tool_calls[0].arguments = R"json({"code":"print(1)","timeout":5})json";
+    const auto extra_python_args = common_chat_templates_apply(native_templates.get(), python_history_inputs).prompt;
+    assert_contains(extra_python_args, "to=functions.python<|channel|>commentary json<|message|>{");
+    assert_contains(extra_python_args, "\"timeout\": 5");
+
+    history_inputs.tools.push_back({ "reference_tool", "Referenced schema", R"({
+        "type":"object","$defs":{
+            "Config":{"type":"object","properties":{"path":{"type":"string"},"next":{"$ref":"#/$defs/Config"}},"required":["path"]},
+            "Choices":{"anyOf":[{"type":"integer"},{"type":"string"}]}
+        },"properties":{"config":{"$ref":"#/$defs/Config"},"configs":{"type":"array","items":{"$ref":"#/$defs/Config"}},"choice":{"$ref":"#/$defs/Choices/anyOf/0"}}
+    })" });
+    const auto references = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    assert_contains(references, "path: string");
+    assert_equals(std::string::npos, references.find("config?: any"));
+    assert_equals(std::string::npos, references.find("configs?: any[]"));
+    const auto config_alias = "schema_" + std::to_string(history_inputs.tools.size() - 1) + "_0";
+    assert_contains(references, "config?: " + config_alias);
+    assert_contains(references, "configs?: " + config_alias + "[]");
+    assert_contains(references, "type " + config_alias + " = {\npath: string,\nnext?: " + config_alias + ",\n};");
+    assert_contains(references, "type schema_" + std::to_string(history_inputs.tools.size() - 1) + "_1 = number;");
+    auto root_ref_inputs = history_inputs;
+    root_ref_inputs.tools = { { "root_ref_tool", "Root reference", R"({
+        "$defs":{"Root":{"type":"object","properties":{"root_value":{"type":"boolean"}},"required":["root_value"]}},
+        "$ref":"#/$defs/Root"
+    })" } };
+    const auto root_reference = common_chat_templates_apply(native_templates.get(), root_ref_inputs).prompt;
+    assert_contains(root_reference, "type root_ref_tool = (_: schema_0_0)");
+    assert_contains(root_reference, "type schema_0_0 = {\nroot_value: boolean,\n};");
+
+    history_inputs.tools.push_back({ "composition_tool", "Intersections and tuples", R"({
+        "type":"object","properties":{
+            "config":{"allOf":[{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]},{"type":"object","properties":{"mode":{"type":"string"}},"required":["mode"]}]},
+            "pair":{"type":"array","prefixItems":[{"type":"string"},{"type":"integer"}]},
+            "inferred_pair":{"prefixItems":[{"type":"boolean"},{"type":"null"}]},
+            "legacy_pair":{"type":"array","items":[{"type":"number"},{"type":"string"}]},
+            "preferred":{"type":"array","items":{"type":"integer"},"prefixItems":[{"type":"string"}]}
+        }
+    })" });
+    const auto compositions = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    const bool intersection = compositions.find("config?: ({\npath: string,\n} & {\nmode: string,\n})") != std::string::npos;
+    const bool tuples = compositions.find("pair?: [string, number]") != std::string::npos &&
+        compositions.find("inferred_pair?: [boolean, null]") != std::string::npos &&
+        compositions.find("legacy_pair?: [number, string]") != std::string::npos &&
+        compositions.find("preferred?: number[]") != std::string::npos;
+    if (!intersection || !tuples) {
+        throw std::runtime_error("Composition regression: intersection=" + std::to_string(intersection) +
+                                 ", tuples=" + std::to_string(tuples));
+    }
+
+    history_inputs.tools.push_back({ "dictionary_tool", "Typed dictionaries", R"({
+        "type":"object","properties":{
+            "labels":{"type":"object","additionalProperties":{"type":"string"}},
+            "mixed":{"type":"object","properties":{"known":{"type":"number"}},"required":["known"],"additionalProperties":{"type":"string"}}
+        }
+    })" });
+    const auto dictionaries = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    assert_contains(dictionaries, "labels?: { [key: string]: string }");
+    assert_contains(dictionaries, "mixed?: {\nknown: number,\n// Additional property values: string\n}");
+
+    auto reserved_inputs = history_inputs;
+    reserved_inputs.tools = { python, patch_tool, { "python.inspect", "Inspect Python", string_schema },
+                             { "apply_patch.validate", "Validate a patch", string_schema } };
+    const auto reserved_namespaces = common_chat_templates_apply(native_templates.get(), reserved_inputs).prompt;
+    assert_contains(reserved_namespaces, "namespace python {");
+    assert_contains(reserved_namespaces, "type inspect =");
+    assert_contains(reserved_namespaces, "namespace apply_patch {");
+    assert_contains(reserved_namespaces, "type validate =");
+
+    root_ref_inputs.tools[0].name = "schema_0_0";
+    const auto collision_reference = common_chat_templates_apply(native_templates.get(), root_ref_inputs).prompt;
+    assert_contains(collision_reference, "type schema_0_0 = (_: schema_0__0)");
+    assert_contains(collision_reference, "type schema_0__0 = {\nroot_value: boolean,\n};");
+    root_ref_inputs.tools.push_back({ "schema_0__0", "Another collision", string_schema });
+    const auto multiple_collisions = common_chat_templates_apply(native_templates.get(), root_ref_inputs).prompt;
+    assert_contains(multiple_collisions, "type schema_0_0 = (_: schema_0___0)");
+    root_ref_inputs.tools[0].name = "custom.schema_0_0";
+    root_ref_inputs.chat_template_kwargs["builtin_tools"] = R"(["custom"])";
+    const auto native_collision = common_chat_templates_apply(native_templates.get(), root_ref_inputs).prompt;
+    assert_contains(native_collision, "namespace custom {");
+    assert_contains(native_collision, "type schema_0_0 = (_: schema_0___0)");
+
+    for (const auto & function : {
+             R"({"name":"no_args","parameters":null})",
+             R"({"name":"no_args"})",
+             R"({"name":"no_args","parameters":{}})" }) {
+        auto no_args_inputs = history_inputs;
+        const auto tool = json{ { "type", "function" }, { "function", json::parse(function) } };
+        no_args_inputs.tools = common_chat_tools_parse_oaicompat(json::array({ tool }));
+        const auto no_args_prompt = common_chat_templates_apply(native_templates.get(), no_args_inputs).prompt;
+        assert_contains(no_args_prompt, "type no_args = () => any;");
+        tst.test(" to=functions.no_args<|channel|>commentary<|message|>{}<|call|>")
+            .tools(no_args_inputs.tools)
+            .expect_tool_calls({ { "no_args", "{}", {} } })
+            .run();
+    }
+
+    auto sibling_inputs = history_inputs;
+    sibling_inputs.tools = { { "sibling_tool", "Sibling constraints", R"({
+        "type":"object","properties":{"config":{"type":"object","properties":{"a":{"type":"string"}},"required":["a"],"additionalProperties":false,
+            "allOf":[{"type":"object","properties":{"rejected_b":{"type":"string"}},"required":["rejected_b"]}]}}
+    })" } };
+    const auto siblings = common_chat_templates_apply(native_templates.get(), sibling_inputs).prompt;
+    assert_contains(siblings, "config?: {\na: string,\n}");
+    assert_equals(std::string::npos, siblings.find("rejected_b"));
+
+    for (const bool reverse : { false, true }) {
+        auto ambiguous_inputs = restricted_inputs;
+        ambiguous_inputs.tools = { { "foo", "Ordinary", string_schema }, { "functions.foo", "Dotted", string_schema } };
+        if (reverse) { std::reverse(ambiguous_inputs.tools.begin(), ambiguous_inputs.tools.end()); }
+        bool rejected = false;
+        try {
+            common_chat_templates_apply(fixture_templates.get(), ambiguous_inputs);
+        } catch (const std::exception & error) {
+            rejected = std::string(error.what()).find("Ambiguous GPT-OSS recipient") != std::string::npos;
+        }
+        assert_equals(true, rejected);
+    }
+
+    const common_chat_template training_template(read_file("examples/gpt-oss-harmony/gpt-oss-native-tools.jinja"), "", "");
+    autoparser::generation_params training_inputs;
+    training_inputs.messages = json::parse(R"([{"role":"user","content":"Question"},{"role":"assistant","content":"Training answer","thinking":"Training reasoning"}])");
+    training_inputs.tools = json::array();
+    training_inputs.extra_context = json::object();
+    training_inputs.is_inference = false;
+    const auto training_prompt = common_chat_params_init_gpt_oss(training_template, training_inputs).prompt;
+    assert_contains(training_prompt, "<|channel|>final<|message|>Training answer<|return|>");
+    assert_contains(training_prompt, "<|channel|>analysis<|message|>Training reasoning<|end|>");
+    training_inputs.is_inference = true;
+    const auto inference_prompt = common_chat_params_init_gpt_oss(training_template, training_inputs).prompt;
+    assert_contains(inference_prompt, "<|channel|>final<|message|>Training answer<|end|>");
+    assert_equals(std::string::npos, inference_prompt.find("<|return|>"));
+
+    auto description_inputs = history_inputs;
+    description_inputs.messages = { message_user };
+    description_inputs.tools = { python, { "browser.search", "Search", string_schema },
+                                 { "normal_tool", "Ordinary", string_schema } };
+    for (auto & tool : description_inputs.tools) { tool.description = "First line\r\nSecond line\rThird line\nFourth line"; }
+    const auto descriptions_prompt = common_chat_templates_apply(native_templates.get(), description_inputs).prompt;
+    const std::string comment = "// First line\n// Second line\n// Third line\n// Fourth line\n";
+    assert_contains(descriptions_prompt, comment + "type normal_tool =");
+    assert_contains(descriptions_prompt, comment + "type search =");
+    assert_contains(descriptions_prompt, comment + "Send code directly to the bare recipient python;");
+
+    for (const auto & role : { "user", "assistant", "system", "developer", "functions" }) {
+        restricted_inputs.tools = { { std::string(role) + ".lookup", "Lookup", string_schema } };
+        auto delimiters = common_chat_templates_apply(fixture_templates.get(), restricted_inputs).message_delimiters;
+        // Model-independent token sequences retain the real headers' prefix relationship.
+        for (auto & delimiter : delimiters.delimiters) {
+            delimiter.tokens.assign(delimiter.delimiter.begin(), delimiter.delimiter.end());
+        }
+        const std::string prompt = "<|start|>user<|message|>Question<|end|><|start|>" + std::string(role) +
+            ".lookup to=assistant<|channel|>commentary<|message|>Result<|end|>";
+        const auto spans = delimiters.split(llama_tokens(prompt.begin(), prompt.end()));
+        assert_equals<size_t>(2, spans.spans.size());
+        assert_equals(COMMON_CHAT_ROLE_USER, spans.spans[0].role);
+        assert_equals(COMMON_CHAT_ROLE_TOOL, spans.spans[1].role);
+        assert_equals<int32_t>(0, spans.last_user_message_pos());
+    }
+
+    for (const bool reverse : { false, true }) {
+        std::vector<common_chat_tool> colliding_tools = {
+            { "repo.tools", "Dotted tool", R"({"type":"object","properties":{"dotted":{"type":"string"}},"required":["dotted"],"additionalProperties":false})" },
+            { "repo-tools", "Ordinary tool", R"({"type":"object","properties":{"ordinary":{"type":"integer"}},"required":["ordinary"],"additionalProperties":false})" }
+        };
+        if (reverse) { std::reverse(colliding_tools.begin(), colliding_tools.end()); }
+        for (const auto & header : { " to=repo.tools<|channel|>commentary<|message|>",
+                                    "<|channel|>analysis to=functions.repo.tools<|message|>" }) {
+            tst.test(std::string(header) + R"({"dotted":"ok"})" + "<|call|>")
+                .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+                .tools(colliding_tools)
+                .expect_tool_calls({ { "repo.tools", R"({"dotted":"ok"})", {} } })
+                .run();
+        }
+        tst.test(" to=functions.repo-tools<|channel|>commentary<|message|>{\"ordinary\":2}<|call|>")
+            .tools(colliding_tools)
+            .expect_tool_calls({ { "repo-tools", R"({"ordinary":2})", {} } })
+            .run();
+    }
 }
 
 static void test_template_output_peg_parsers(bool detailed_debug) {
@@ -7671,6 +8196,7 @@ static void test_msg_diffs_compute() {
 int main(int argc, char ** argv) {
     bool detailed_debug    = false;
     bool only_run_filtered = false;
+    bool only_run_native = false;
 
     // Check for --template and --detailed flags
     for (int i = 1; i < argc; i++) {
@@ -7688,6 +8214,20 @@ int main(int argc, char ** argv) {
             g_force_reconstruction_test = true;
             only_run_filtered          = true;
         }
+        if (arg == "--gpt-oss-native-tool-recipients") {
+            only_run_native = true;
+        }
+    }
+
+    if (only_run_native) {
+        try {
+            test_gpt_oss_native_tool_recipients(detailed_debug);
+        } catch (const std::exception & error) {
+            std::cerr << "GPT-OSS native tool test failed: " << error.what() << '\n';
+            return 1;
+        }
+        std::cout << "\n[chat] GPT-OSS native tool recipient tests passed!\n";
+        return 0;
     }
 
     if (only_run_filtered) {
@@ -7741,6 +8281,7 @@ int main(int argc, char ** argv) {
 #endif
     {
         test_msg_diffs_compute();
+        test_gpt_oss_native_tool_recipients(detailed_debug);
         test_msgs_oaicompat_json_conversion();
         test_msg_token_delimiters_split();
         test_tools_oaicompat_json_conversion();

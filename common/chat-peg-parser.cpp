@@ -5,6 +5,7 @@
 #include "peg-parser.h"
 
 #include <cstdint>
+#include <cstring>
 #include <functional>
 
 using ordered_json = common_json;
@@ -333,6 +334,8 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
     bool is_tool_name  = node.tag == common_chat_peg_builder::TOOL_NAME;
     bool is_tool_id    = node.tag == common_chat_peg_builder::TOOL_ID;
     bool is_tool_args  = node.tag == common_chat_peg_builder::TOOL_ARGS;
+    bool is_raw_args   = node.tag.compare(0, std::strlen(common_chat_peg_builder::TOOL_ARGS_RAW),
+                                         common_chat_peg_builder::TOOL_ARGS_RAW) == 0;
     bool is_arg_open   = node.tag == common_chat_peg_builder::TOOL_ARG_OPEN;
     bool is_arg_close  = node.tag == common_chat_peg_builder::TOOL_ARG_CLOSE;
     bool is_arg_name         = node.tag == common_chat_peg_builder::TOOL_ARG_NAME;
@@ -369,6 +372,15 @@ void common_chat_peg_mapper::map(const common_peg_ast_node & node) {
             result.tool_calls.push_back(pending_tool_call.value());
             pending_tool_call.reset();
             current_tool = &result.tool_calls.back();
+        }
+    }
+
+    if (is_raw_args && current_tool) {
+        const auto key = node.tag.substr(std::strlen(common_chat_peg_builder::TOOL_ARGS_RAW));
+        args_target() = "{" + ordered_json(key).dump() + ":\"" + escape_json_string_inner(node.sanitized_text());
+        closing_quote_pending = is_partial;
+        if (!is_partial) {
+            args_target() += "\"}";
         }
     }
 

@@ -11,7 +11,7 @@ class common_chat_peg_mapper {
   public:
     common_chat_msg & result;
 
-    common_chat_peg_mapper(common_chat_msg & msg) : result(msg) {}
+    common_chat_peg_mapper(common_chat_msg & msg, bool is_partial = false) : result(msg), is_partial(is_partial) {}
 
     virtual ~common_chat_peg_mapper() = default;
 
@@ -20,6 +20,7 @@ class common_chat_peg_mapper {
   protected:
     virtual std::string normalize_container_value(const std::string & input);
   private:
+      bool is_partial;
       // Tool call handling state
       std::optional<common_chat_tool_call> pending_tool_call;  // Tool call waiting for name
       common_chat_tool_call *              current_tool          = nullptr;
@@ -71,6 +72,7 @@ class common_chat_peg_builder : public common_peg_parser_builder {
     static constexpr const char * TOOL_ID        = "tool-id";
     static constexpr const char * TOOL_NAME      = "tool-name";
     static constexpr const char * TOOL_ARGS      = "tool-args";
+    static constexpr const char * TOOL_ARGS_RAW  = "tool-args-raw:";
     static constexpr const char * TOOL_ARG       = "tool-arg";
     static constexpr const char * TOOL_ARG_OPEN  = "tool-arg-open";
     static constexpr const char * TOOL_ARG_CLOSE = "tool-arg-close";
@@ -96,6 +98,9 @@ class common_chat_peg_builder : public common_peg_parser_builder {
     common_peg_parser tool_id(const common_peg_parser & p) { return atomic(tag(TOOL_ID, p)); }
     common_peg_parser tool_name(const common_peg_parser & p) { return atomic(tag(TOOL_NAME, p)); }
     common_peg_parser tool_args(const common_peg_parser & p) { return tag(TOOL_ARGS, p); }
+    common_peg_parser tool_args_raw(const common_peg_parser & p, const std::string & key) {
+        return tag(std::string(TOOL_ARGS_RAW) + key, p);
+    }
     common_peg_parser tool_arg(const common_peg_parser & p) { return tag(TOOL_ARG, p); }
     common_peg_parser tool_arg_open(const common_peg_parser & p) { return atomic(tag(TOOL_ARG_OPEN, p)); }
     common_peg_parser tool_arg_close(const common_peg_parser & p) { return atomic(tag(TOOL_ARG_CLOSE, p)); }
