@@ -2327,6 +2327,19 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
     assert_contains(all_browser_tools, "type search =");
     assert_contains(all_browser_tools, "type open =");
     assert_contains(all_browser_tools, "type find =");
+    history_inputs.tools.push_back({ "array_schema_tool", "Array schema rendering", R"({
+        "type":"object","properties":{
+            "unconstrained":{"type":"array"},
+            "nullable":{"type":["array","null"],"items":{"type":"string"}},
+            "nullable_unconstrained":{"type":["null","array"]},
+            "nested":{"type":"array","items":{"type":["array","null"],"items":{"type":"integer"}}}
+        }
+    })" });
+    const auto array_types = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    assert_contains(array_types, "unconstrained?: any[]");
+    assert_contains(array_types, "nullable?: string[] | null");
+    assert_contains(array_types, "nullable_unconstrained?: null | any[]");
+    assert_contains(array_types, "nested?: (number[] | null)[]");
 }
 
 static void test_template_output_peg_parsers(bool detailed_debug) {

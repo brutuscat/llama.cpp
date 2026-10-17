@@ -6,17 +6,18 @@
   llama.cpp can parse their schemas, but never renders them in `functions`.
   Browser, container, and repo_browser are declared in their native Harmony namespaces.
 #}
-{%- macro ts_type(spec) -%}
-  {%- if spec.type is iterable and spec.type is not string -%}
-    {%- for kind in spec.type -%}{{ ts_type({'type': kind}) }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
-  {%- elif spec.type == 'string' -%}string
-  {%- elif spec.type in ['number', 'integer'] -%}number
-  {%- elif spec.type == 'boolean' -%}boolean
-  {%- elif spec.type == 'null' -%}null
-  {%- elif spec.type == 'array' -%}
-    {%- set item_type = ts_type(spec['items']) if spec['items'] else 'any' -%}
+{%- macro ts_type(spec, type_override=none) -%}
+  {%- set kind = spec.type if type_override is none else type_override -%}
+  {%- if kind is iterable and kind is not string -%}
+    {%- for member in kind -%}{{ ts_type(spec, member) }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
+  {%- elif kind == 'string' -%}string
+  {%- elif kind in ['number', 'integer'] -%}number
+  {%- elif kind == 'boolean' -%}boolean
+  {%- elif kind == 'null' -%}null
+  {%- elif kind == 'array' -%}
+    {%- set item_type = ts_type(spec['items']) if 'items' in spec else 'any' -%}
     {{- '(' + item_type + ')' if ' | ' in item_type else item_type -}}[]
-  {%- elif spec.type == 'object' -%}object
+  {%- elif kind == 'object' -%}object
   {%- else -%}any
   {%- endif -%}
 {%- endmacro -%}
