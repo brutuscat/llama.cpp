@@ -1,8 +1,21 @@
 #include "parsers.h"
 
+#include <unordered_set>
+
 common_chat_params common_chat_params_init_gpt_oss(const common_chat_template &    tmpl,
                                                           const autoparser::generation_params & inputs) {
     common_chat_params data;
+
+    std::unordered_set<std::string> tool_names;
+    foreach_function(inputs.tools, [&](const json & tool) {
+        tool_names.insert(tool.at("function").at("name").get<std::string>());
+    });
+    foreach_function(inputs.tools, [&](const json & tool) {
+        const auto name = tool.at("function").at("name").get<std::string>();
+        if (name.compare(0, 10, "functions.") == 0 && tool_names.count(name.substr(10))) {
+            throw std::invalid_argument("Ambiguous GPT-OSS recipient " + name + " for tools " + name.substr(10) + " and " + name);
+        }
+    });
 
     // Copy reasoning to the "thinking" field as expected by the gpt-oss template
     auto adjusted_messages = json::array();

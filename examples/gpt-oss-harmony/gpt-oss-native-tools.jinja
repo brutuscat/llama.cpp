@@ -37,6 +37,8 @@
   {%- if type_override is none and spec.type is not defined -%}
     {%- if 'properties' in spec or ('additionalProperties' in spec and spec.additionalProperties != true) -%}
       {%- set kind = 'object' -%}
+    {%- elif spec.allOf -%}
+      {%- set kind = 'allOf' -%}
     {%- elif 'items' in spec or 'prefixItems' in spec -%}
       {%- set kind = 'array' -%}
     {%- elif 'pattern' in spec or 'minLength' in spec or 'maxLength' in spec -%}
@@ -56,23 +58,17 @@
     {{- spec['const']|tojson -}}
   {%- elif type_override is none and spec.enum -%}
     {%- for value in spec.enum -%}{{ value|tojson }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
-  {%- elif type_override is none and (spec.oneOf or spec.anyOf or spec.allOf) -%}
-    {%- if spec.type is defined -%}{{- '(' + ts_type(spec, spec.type, root, refs) + ') & ' -}}{%- endif -%}
-    {%- set composition = namespace(rendered=false) -%}
-    {%- for keyword in ['oneOf', 'anyOf', 'allOf'] -%}
-      {%- if spec[keyword] -%}
-        {{- ' & ' if composition.rendered else '' -}}
-        {%- set composition.rendered = true -%}
-        {{- '(' -}}
-        {%- for alternative in spec[keyword] -%}
-          {{- ts_type(alternative, none, root, refs) -}}
-          {{- (' & ' if keyword == 'allOf' else ' | ') if not loop.last else '' -}}
-        {%- endfor -%}
-        {{- ')' -}}
-      {%- endif -%}
-    {%- endfor -%}
+  {%- elif type_override is none and (spec.oneOf or spec.anyOf) -%}
+    {%- set alternatives = spec.oneOf if spec.oneOf else spec.anyOf -%}
+    {{- '(' -}}
+    {%- for alternative in alternatives -%}{{ ts_type(alternative, none, root, refs) }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
+    {{- ')' -}}
   {%- elif kind is iterable and kind is not string -%}
     {%- for member in kind -%}{{ ts_type(spec, member, root, refs) }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
+  {%- elif spec.allOf and (kind == 'allOf' or kind == 'string' or (kind == 'object' and 'properties' not in spec and ('additionalProperties' not in spec or spec.additionalProperties == true))) -%}
+    {{- '(' -}}
+    {%- for alternative in spec.allOf -%}{{ ts_type(alternative, none, root, refs) }}{{ ' & ' if not loop.last else '' }}{%- endfor -%}
+    {{- ')' -}}
   {%- elif kind == 'string' -%}string
   {%- elif kind in ['number', 'integer'] -%}number
   {%- elif kind == 'boolean' -%}boolean
@@ -230,7 +226,12 @@
       {%- endif -%}
       {%- set last_tool_call.name = call_recipient -%}
     {%- else -%}
-      {{- '<|start|>assistant<|channel|>final<|message|>' + message.content + '<|end|>' -}}
+      {%- if loop.last and not add_generation_prompt -%}
+        {%- if message.thinking -%}{{- '<|start|>assistant<|channel|>analysis<|message|>' + message.thinking + '<|end|>' -}}{%- endif -%}
+        {{- '<|start|>assistant<|channel|>final<|message|>' + message.content + '<|return|>' -}}
+      {%- else -%}
+        {{- '<|start|>assistant<|channel|>final<|message|>' + message.content + '<|end|>' -}}
+      {%- endif -%}
       {%- set last_tool_call.name = none -%}
     {%- endif -%}
   {%- elif message.role == 'tool' -%}

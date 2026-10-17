@@ -14,6 +14,7 @@
 #include "common.h"
 #include "ggml.h"
 #include "log.h"
+#include "parsers/parsers.h"
 
 #include <algorithm>
 #include <exception>
@@ -2415,7 +2416,7 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
         choices.find("number?: 0 | 2") != std::string::npos &&
         choices.find("variant?: (string | {\n// Select a file.\nkind: \"file\",\n})") != std::string::npos &&
         choices.find("optional?: (number | null)") != std::string::npos &&
-        choices.find("typed?: (string) & (\"a\" | \"b\")") != std::string::npos &&
+        choices.find("typed?: (\"a\" | \"b\")") != std::string::npos &&
         choices.find("items?: (\"a\" | \"b\")[]") != std::string::npos;
     if (!descriptions || !constraints) {
         throw std::runtime_error("Schema choices regression: descriptions=" + std::to_string(descriptions) +
@@ -2566,6 +2567,42 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
             .expect_tool_calls({ { "no_args", "{}", {} } })
             .run();
     }
+
+    auto sibling_inputs = history_inputs;
+    sibling_inputs.tools = { { "sibling_tool", "Sibling constraints", R"({
+        "type":"object","properties":{"config":{"type":"object","properties":{"a":{"type":"string"}},"required":["a"],"additionalProperties":false,
+            "allOf":[{"type":"object","properties":{"rejected_b":{"type":"string"}},"required":["rejected_b"]}]}}
+    })" } };
+    const auto siblings = common_chat_templates_apply(native_templates.get(), sibling_inputs).prompt;
+    assert_contains(siblings, "config?: {\na: string,\n}");
+    assert_equals(std::string::npos, siblings.find("rejected_b"));
+
+    for (const bool reverse : { false, true }) {
+        auto ambiguous_inputs = restricted_inputs;
+        ambiguous_inputs.tools = { { "foo", "Ordinary", string_schema }, { "functions.foo", "Dotted", string_schema } };
+        if (reverse) { std::reverse(ambiguous_inputs.tools.begin(), ambiguous_inputs.tools.end()); }
+        bool rejected = false;
+        try {
+            common_chat_templates_apply(fixture_templates.get(), ambiguous_inputs);
+        } catch (const std::exception & error) {
+            rejected = std::string(error.what()).find("Ambiguous GPT-OSS recipient") != std::string::npos;
+        }
+        assert_equals(true, rejected);
+    }
+
+    const common_chat_template training_template(read_file("examples/gpt-oss-harmony/gpt-oss-native-tools.jinja"), "", "");
+    autoparser::generation_params training_inputs;
+    training_inputs.messages = json::parse(R"([{"role":"user","content":"Question"},{"role":"assistant","content":"Training answer","thinking":"Training reasoning"}])");
+    training_inputs.tools = json::array();
+    training_inputs.extra_context = json::object();
+    training_inputs.is_inference = false;
+    const auto training_prompt = common_chat_params_init_gpt_oss(training_template, training_inputs).prompt;
+    assert_contains(training_prompt, "<|channel|>final<|message|>Training answer<|return|>");
+    assert_contains(training_prompt, "<|channel|>analysis<|message|>Training reasoning<|end|>");
+    training_inputs.is_inference = true;
+    const auto inference_prompt = common_chat_params_init_gpt_oss(training_template, training_inputs).prompt;
+    assert_contains(inference_prompt, "<|channel|>final<|message|>Training answer<|end|>");
+    assert_equals(std::string::npos, inference_prompt.find("<|return|>"));
 
     auto description_inputs = history_inputs;
     description_inputs.messages = { message_user };
