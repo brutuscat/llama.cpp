@@ -2520,6 +2520,38 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
                                  ", tuples=" + std::to_string(tuples));
     }
 
+    history_inputs.tools.push_back({ "dictionary_tool", "Typed dictionaries", R"({
+        "type":"object","properties":{
+            "labels":{"type":"object","additionalProperties":{"type":"string"}},
+            "mixed":{"type":"object","properties":{"known":{"type":"number"}},"required":["known"],"additionalProperties":{"type":"string"}}
+        }
+    })" });
+    const auto dictionaries = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    assert_contains(dictionaries, "labels?: { [key: string]: string }");
+    assert_contains(dictionaries, "mixed?: {\nknown: number,\n// Additional property values: string\n}");
+
+    auto reserved_inputs = history_inputs;
+    reserved_inputs.tools = { python, patch_tool, { "python.inspect", "Inspect Python", string_schema },
+                             { "apply_patch.validate", "Validate a patch", string_schema } };
+    const auto reserved_namespaces = common_chat_templates_apply(native_templates.get(), reserved_inputs).prompt;
+    assert_contains(reserved_namespaces, "namespace python {");
+    assert_contains(reserved_namespaces, "type inspect =");
+    assert_contains(reserved_namespaces, "namespace apply_patch {");
+    assert_contains(reserved_namespaces, "type validate =");
+
+    root_ref_inputs.tools[0].name = "schema_0_0";
+    const auto collision_reference = common_chat_templates_apply(native_templates.get(), root_ref_inputs).prompt;
+    assert_contains(collision_reference, "type schema_0_0 = (_: schema_0__0)");
+    assert_contains(collision_reference, "type schema_0__0 = {\nroot_value: boolean,\n};");
+    root_ref_inputs.tools.push_back({ "schema_0__0", "Another collision", string_schema });
+    const auto multiple_collisions = common_chat_templates_apply(native_templates.get(), root_ref_inputs).prompt;
+    assert_contains(multiple_collisions, "type schema_0_0 = (_: schema_0___0)");
+    root_ref_inputs.tools[0].name = "custom.schema_0_0";
+    root_ref_inputs.chat_template_kwargs["builtin_tools"] = R"(["custom"])";
+    const auto native_collision = common_chat_templates_apply(native_templates.get(), root_ref_inputs).prompt;
+    assert_contains(native_collision, "namespace custom {");
+    assert_contains(native_collision, "type schema_0_0 = (_: schema_0___0)");
+
     auto description_inputs = history_inputs;
     description_inputs.messages = { message_user };
     description_inputs.tools = { python, { "browser.search", "Search", string_schema },

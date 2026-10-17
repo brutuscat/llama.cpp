@@ -47,9 +47,10 @@
   {%- endif -%}
   {%- if '$ref' in spec -%}
     {%- if spec['$ref'] is not string or not spec['$ref'].startswith('#/') -%}{{- raise_exception('Only same-document #/ schema references are supported') -}}{%- endif -%}
+    {%- if not refs.paths -%}{%- set refs.prefix = unique_schema_prefix(refs.prefix) -%}{%- endif -%}
     {%- if spec['$ref'] not in refs.paths -%}{%- set refs.paths = refs.paths + [spec['$ref']] -%}{%- endif -%}
     {%- for path in refs.paths -%}
-      {%- if path == spec['$ref'] -%}{{- 'schema_' + refs.prefix + '_' + loop.index0|tojson -}}{%- endif -%}
+      {%- if path == spec['$ref'] -%}{{- refs.prefix + loop.index0|tojson -}}{%- endif -%}
     {%- endfor -%}
   {%- elif type_override is none and 'const' in spec -%}
     {{- spec['const']|tojson -}}
@@ -87,7 +88,16 @@
       {{- '(' + item_type + ')' if ' | ' in item_type else item_type -}}[]
     {%- endif -%}
   {%- elif kind == 'object' -%}
-    {{- '{\n' + object_properties(spec, root, refs) + '}' if spec.properties else 'object' -}}
+    {%- if spec.additionalProperties is mapping -%}
+      {%- set value_type = ts_type(spec.additionalProperties, none, root, refs) -%}
+      {%- if spec.properties -%}
+        {{- '{\n' + object_properties(spec, root, refs) + description_comment('Additional property values: ' + value_type) + '}' -}}
+      {%- else -%}
+        {{- '{ [key: string]: ' + value_type + ' }' -}}
+      {%- endif -%}
+    {%- else -%}
+      {{- '{\n' + object_properties(spec, root, refs) + '}' if spec.properties else 'object' -}}
+    {%- endif -%}
   {%- else -%}any
   {%- endif -%}
 {%- endmacro -%}
@@ -102,13 +112,24 @@
         {%- set target.value = target.value[key|int] -%}
       {%- else -%}{{- raise_exception('Cannot resolve schema reference: ' + refs.paths[index]) -}}{%- endif -%}
     {%- endfor -%}
-    {{- 'type schema_' + refs.prefix + '_' + index|tojson + ' = ' + ts_type(target.value, none, root, refs) + ';\n\n' -}}
+    {{- 'type ' + refs.prefix + index|tojson + ' = ' + ts_type(target.value, none, root, refs) + ';\n\n' -}}
     {{- reference_definitions(root, refs, index + 1) -}}
   {%- endif -%}
 {%- endmacro -%}
 
+{%- macro unique_schema_prefix(prefix) -%}
+  {%- set collision = namespace(found=false) -%}
+  {%- for entry in tools or [] -%}
+    {%- set local_name = entry.function.name.split('.')[1:]|join('.') -%}
+    {%- if entry.function.name.startswith(prefix) or local_name.startswith(prefix) -%}
+      {%- set collision.found = true -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {{- unique_schema_prefix(prefix + '_') if collision.found else prefix -}}
+{%- endmacro -%}
+
 {%- macro function_definition(tool, name, schema_index) -%}
-  {%- set refs = namespace(paths=[], prefix=schema_index|tojson) -%}
+  {%- set refs = namespace(paths=[], prefix='schema_' + schema_index|tojson + '_') -%}
   {{- description_comment(tool.description) -}}
   {{- 'type ' + name + ' = (_: ' + ts_type(tool.parameters, none, tool.parameters, refs) + ') => any;\n\n' -}}
   {{- reference_definitions(tool.parameters, refs) -}}
@@ -146,9 +167,7 @@
 
 {%- macro native_builtin_tools() -%}
   {%- for namespace_name in builtin_tools or [] -%}
-    {%- if namespace_name not in ['python', 'apply_patch'] -%}
-      {{- native_namespace(namespace_name) -}}
-    {%- endif -%}
+    {{- native_namespace(namespace_name) -}}
   {%- endfor -%}
   {%- for entry in tools or [] -%}
     {%- set tool = entry.function -%}
