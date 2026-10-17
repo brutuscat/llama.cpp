@@ -19,13 +19,30 @@
 
 {%- macro object_properties(spec) -%}
   {%- for name, member in (spec.properties or {}).items() -%}
+    {%- if member.description -%}
+      {{- '// ' + member.description|replace('\r\n', '\n')|replace('\r', '\n')|replace('\n', '\n// ') + '\n' -}}
+    {%- endif -%}
     {{- property_name(name) + ('' if name in (spec.required or []) else '?') + ': ' + ts_type(member) + ',\n' -}}
   {%- endfor -%}
 {%- endmacro -%}
 
 {%- macro ts_type(spec, type_override=none) -%}
   {%- set kind = spec.type if type_override is none else type_override -%}
-  {%- if kind is iterable and kind is not string -%}
+  {%- if type_override is none and 'const' in spec -%}
+    {{- spec['const']|tojson -}}
+  {%- elif type_override is none and spec.enum -%}
+    {%- for value in spec.enum -%}{{ value|tojson }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
+  {%- elif type_override is none and (spec.oneOf or spec.anyOf) -%}
+    {%- if spec.type is defined -%}{{- '(' + ts_type(spec, spec.type) + ') & ' -}}{%- endif -%}
+    {%- for keyword in ['oneOf', 'anyOf'] -%}
+      {%- if spec[keyword] -%}
+        {{- ' & ' if keyword == 'anyOf' and spec.oneOf else '' -}}
+        {{- '(' -}}
+        {%- for alternative in spec[keyword] -%}{{ ts_type(alternative) }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
+        {{- ')' -}}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- elif kind is iterable and kind is not string -%}
     {%- for member in kind -%}{{ ts_type(spec, member) }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
   {%- elif kind == 'string' -%}string
   {%- elif kind in ['number', 'integer'] -%}number

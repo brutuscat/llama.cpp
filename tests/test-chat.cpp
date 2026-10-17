@@ -2394,6 +2394,53 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
         assert_equals(std::string::npos, resumed.find("ACTIVE_TOOL_REASONING"));
         assert_contains(resumed, "<|channel|>analysis<|message|>NEXT_TOOL_REASONING<|end|>");
     }
+
+    history_inputs.tools.push_back({ "choice_tool", "Schema choices", R"({
+        "type":"object","properties":{
+            "mode":{"type":"string","description":"Choose the operation.\nKeep the source unchanged.","enum":["read","write"]},
+            "flag":{"const":false},
+            "nothing":{"const":null},
+            "number":{"enum":[0,2]},
+            "variant":{"oneOf":[{"type":"string"},{"type":"object","properties":{"kind":{"const":"file","description":"Select a file."}},"required":["kind"]}]},
+            "optional":{"anyOf":[{"type":"integer"},{"type":"null"}]},
+            "typed":{"type":"string","anyOf":[{"const":"a"},{"const":"b"}]},
+            "items":{"type":"array","items":{"enum":["a","b"]}}
+        }
+    })" });
+    const auto choices = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    const bool descriptions = choices.find("// Choose the operation.\n// Keep the source unchanged.\nmode?:") != std::string::npos &&
+        choices.find("// Select a file.\nkind:") != std::string::npos;
+    const bool constraints = choices.find("mode?: \"read\" | \"write\"") != std::string::npos &&
+        choices.find("flag?: false") != std::string::npos && choices.find("nothing?: null") != std::string::npos &&
+        choices.find("number?: 0 | 2") != std::string::npos &&
+        choices.find("variant?: (string | {\n// Select a file.\nkind: \"file\",\n})") != std::string::npos &&
+        choices.find("optional?: (number | null)") != std::string::npos &&
+        choices.find("typed?: (string) & (\"a\" | \"b\")") != std::string::npos &&
+        choices.find("items?: (\"a\" | \"b\")[]") != std::string::npos;
+    if (!descriptions || !constraints) {
+        throw std::runtime_error("Schema choices regression: descriptions=" + std::to_string(descriptions) +
+                                 ", constraints=" + std::to_string(constraints));
+    }
+
+    for (const bool reverse : { false, true }) {
+        std::vector<common_chat_tool> colliding_tools = {
+            { "repo.tools", "Dotted tool", R"({"type":"object","properties":{"dotted":{"type":"string"}},"required":["dotted"],"additionalProperties":false})" },
+            { "repo-tools", "Ordinary tool", R"({"type":"object","properties":{"ordinary":{"type":"integer"}},"required":["ordinary"],"additionalProperties":false})" }
+        };
+        if (reverse) { std::reverse(colliding_tools.begin(), colliding_tools.end()); }
+        for (const auto & header : { " to=repo.tools<|channel|>commentary<|message|>",
+                                    "<|channel|>analysis to=functions.repo.tools<|message|>" }) {
+            tst.test(std::string(header) + R"({"dotted":"ok"})" + "<|call|>")
+                .reasoning_format(COMMON_REASONING_FORMAT_AUTO)
+                .tools(colliding_tools)
+                .expect_tool_calls({ { "repo.tools", R"({"dotted":"ok"})", {} } })
+                .run();
+        }
+        tst.test(" to=functions.repo-tools<|channel|>commentary<|message|>{\"ordinary\":2}<|call|>")
+            .tools(colliding_tools)
+            .expect_tool_calls({ { "repo-tools", R"({"ordinary":2})", {} } })
+            .run();
+    }
 }
 
 static void test_template_output_peg_parsers(bool detailed_debug) {
