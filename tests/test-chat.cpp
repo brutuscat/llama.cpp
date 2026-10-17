@@ -2340,6 +2340,60 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
     assert_contains(array_types, "nullable?: string[] | null");
     assert_contains(array_types, "nullable_unconstrained?: null | any[]");
     assert_contains(array_types, "nested?: (number[] | null)[]");
+
+    history_inputs.tools.push_back({ "schema_tool", "Structured parameters", R"({
+        "type":"object","properties":{
+            "file-path":{"type":"string"},
+            "x value":{"type":"integer"},
+            "quote\"key":{"type":"boolean"},
+            "9key":{"type":"string"},
+            "$safe_key9":{"type":"string"},
+            "config":{"type":["object","null"],"properties":{
+                "path":{"type":"string"},
+                "mode":{"type":"integer"},
+                "nested":{"type":"object","properties":{"child-key":{"type":"boolean"}},"required":["child-key"]}
+            },"required":["path","mode"]},
+            "records":{"type":"array","items":{"type":"object","properties":{"record-id":{"type":"string"}},"required":["record-id"]}}
+        },"required":["file-path","config"]
+    })" });
+    const auto structured_types = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    const bool quoted_keys = structured_types.find("\"file-path\": string") != std::string::npos &&
+        structured_types.find("\"x value\"?: number") != std::string::npos &&
+        structured_types.find("\"quote\\\"key\"?: boolean") != std::string::npos &&
+        structured_types.find("\"9key\"?: string") != std::string::npos &&
+        structured_types.find("$safe_key9?: string") != std::string::npos;
+    const bool nested_objects = structured_types.find("config: {\npath: string,\nmode: number,\nnested?: {\n\"child-key\": boolean,\n},\n} | null") != std::string::npos &&
+        structured_types.find("records?: {\n\"record-id\": string,\n}[]") != std::string::npos;
+    if (!quoted_keys || !nested_objects) {
+        throw std::runtime_error("Structured schema regression: quoted_keys=" + std::to_string(quoted_keys) +
+                                 ", nested_objects=" + std::to_string(nested_objects));
+    }
+
+    for (const bool use_content : { false, true }) {
+        history_inputs.messages = common_chat_msgs_parse_oaicompat(json::parse(R"([
+            {"role":"user","content":"Search."},
+            {"role":"assistant","tool_calls":[{"type":"function","function":{"name":"browser.search","arguments":"{\"value\":\"query\"}"}}]},
+            {"role":"tool","content":"Search result"}
+        ])"));
+        auto & call_message = history_inputs.messages[1];
+        (use_content ? call_message.content : call_message.reasoning_content) = "ACTIVE_TOOL_REASONING";
+        const auto active = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+        assert_contains(active, "<|channel|>analysis<|message|>ACTIVE_TOOL_REASONING<|end|>");
+        auto next_call = call_message;
+        history_inputs.messages.push_back({ "assistant", "FINAL_ANSWER" });
+        history_inputs.messages.push_back({ "user", "Next question." });
+        const auto completed = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+        assert_equals(std::string::npos, completed.find("ACTIVE_TOOL_REASONING"));
+        assert_contains(completed, "<|channel|>final<|message|>FINAL_ANSWER<|end|>");
+        assert_contains(completed, "to=browser.search<|channel|>commentary json<|message|>{");
+        assert_contains(completed, "<|start|>browser.search to=assistant<|channel|>commentary<|message|>Search result<|end|>");
+        (use_content ? next_call.content : next_call.reasoning_content) = "NEXT_TOOL_REASONING";
+        history_inputs.messages.push_back(next_call);
+        history_inputs.messages.push_back({ "tool", "Next result" });
+        const auto resumed = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+        assert_equals(std::string::npos, resumed.find("ACTIVE_TOOL_REASONING"));
+        assert_contains(resumed, "<|channel|>analysis<|message|>NEXT_TOOL_REASONING<|end|>");
+    }
 }
 
 static void test_template_output_peg_parsers(bool detailed_debug) {

@@ -6,6 +6,23 @@
   llama.cpp can parse their schemas, but never renders them in `functions`.
   Browser, container, and repo_browser are declared in their native Harmony namespaces.
 #}
+{%- macro property_name(name) -%}
+  {%- set identifier = namespace(valid=name|length > 0) -%}
+  {%- for index in range(name|length) -%}
+    {%- set char = name[index] -%}
+    {%- if char not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_$' and (loop.first or char not in '0123456789') -%}
+      {%- set identifier.valid = false -%}
+    {%- endif -%}
+  {%- endfor -%}
+  {{- name if identifier.valid else name|tojson -}}
+{%- endmacro -%}
+
+{%- macro object_properties(spec) -%}
+  {%- for name, member in (spec.properties or {}).items() -%}
+    {{- property_name(name) + ('' if name in (spec.required or []) else '?') + ': ' + ts_type(member) + ',\n' -}}
+  {%- endfor -%}
+{%- endmacro -%}
+
 {%- macro ts_type(spec, type_override=none) -%}
   {%- set kind = spec.type if type_override is none else type_override -%}
   {%- if kind is iterable and kind is not string -%}
@@ -17,7 +34,8 @@
   {%- elif kind == 'array' -%}
     {%- set item_type = ts_type(spec['items']) if 'items' in spec else 'any' -%}
     {{- '(' + item_type + ')' if ' | ' in item_type else item_type -}}[]
-  {%- elif kind == 'object' -%}object
+  {%- elif kind == 'object' -%}
+    {{- '{\n' + object_properties(spec) + '}' if spec.properties else 'object' -}}
   {%- else -%}any
   {%- endif -%}
 {%- endmacro -%}
@@ -25,9 +43,7 @@
 {%- macro function_definition(tool, name) -%}
   {{- '// ' + (tool.description or '') + '\n' -}}
   {{- 'type ' + name + ' = (_: {\n' -}}
-  {%- for name, spec in (tool.parameters.properties or {}).items() -%}
-    {{- name + ('' if name in (tool.parameters.required or []) else '?') + ': ' + ts_type(spec) + ',\n' -}}
-  {%- endfor -%}
+  {{- object_properties(tool.parameters) -}}
   {{- '}) => any;\n\n' -}}
 {%- endmacro -%}
 
@@ -98,6 +114,12 @@
   {{- '<|end|>' -}}
 {%- endif -%}
 
+{%- set last_final = namespace(index=-1) -%}
+{%- for message in messages -%}
+  {%- if message.role == 'assistant' and not message.tool_calls -%}
+    {%- set last_final.index = loop.index0 -%}
+  {%- endif -%}
+{%- endfor -%}
 {%- set last_tool_call = namespace(name=none) -%}
 {%- for message in messages -%}
   {%- if message.role == 'assistant' -%}
@@ -105,7 +127,9 @@
       {%- if message.tool_calls|length != 1 -%}{{- raise_exception('GPT-OSS requires one tool call per message') -}}{%- endif -%}
       {%- set call = message.tool_calls[0].function if message.tool_calls[0].function else message.tool_calls[0] -%}
       {%- if call.arguments is string -%}{{- raise_exception('Tool arguments must be decoded JSON; use the common chat template renderer') -}}{%- endif -%}
-      {%- if message.content -%}{{- '<|start|>assistant<|channel|>analysis<|message|>' + message.content + '<|end|>' -}}{%- elif message.thinking -%}{{- '<|start|>assistant<|channel|>analysis<|message|>' + message.thinking + '<|end|>' -}}{%- endif -%}
+      {%- if loop.index0 > last_final.index -%}
+        {%- if message.content -%}{{- '<|start|>assistant<|channel|>analysis<|message|>' + message.content + '<|end|>' -}}{%- elif message.thinking -%}{{- '<|start|>assistant<|channel|>analysis<|message|>' + message.thinking + '<|end|>' -}}{%- endif -%}
+      {%- endif -%}
       {%- if call.name == 'python' and builtin_tools and 'python' in builtin_tools -%}
         {{- '<|start|>assistant to=python<|channel|>commentary<|message|>' + call.arguments.code + '<|call|>' -}}
       {%- else -%}
