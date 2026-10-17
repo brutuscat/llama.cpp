@@ -2422,6 +2422,24 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
                                  ", constraints=" + std::to_string(constraints));
     }
 
+    history_inputs.tools.push_back({ "default_tool", "Parameter defaults", R"({
+        "type":"object","properties":{
+            "enabled":{"type":"boolean","default":false},
+            "count":{"type":"integer","default":0},
+            "name":{"type":"string","default":""},
+            "value":{"type":["string","null"],"default":null},
+            "nested":{"type":"object","properties":{
+                "mode":{"type":"string","description":"Use this mode when omitted.","default":"read\n\"only\""}
+            }}
+        }
+    })" });
+    const auto defaults = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    assert_contains(defaults, "// default: false\nenabled?: boolean");
+    assert_contains(defaults, "// default: 0\ncount?: number");
+    assert_contains(defaults, "// default: \"\"\nname?: string");
+    assert_contains(defaults, "// default: null\nvalue?: string | null");
+    assert_contains(defaults, "// Use this mode when omitted.\n// default: \"read\\n\\\"only\\\"\"\nmode?: string");
+
     for (const bool reverse : { false, true }) {
         std::vector<common_chat_tool> colliding_tools = {
             { "repo.tools", "Dotted tool", R"({"type":"object","properties":{"dotted":{"type":"string"}},"required":["dotted"],"additionalProperties":false})" },
