@@ -2138,7 +2138,8 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
     auto tst = peg_tester("tests/gpt-oss-native-tools.jinja", detailed_debug);
     const std::string string_schema = R"({"type":"object","properties":{"value":{"type":"string"}},"required":["value"]})";
     for (const auto & name : { "browser.search", "browser.open", "browser.find", "container.exec",
-                               "repo_browser.print_tree", "repo_browser.search", "repo_browser.open_file", "repo-tools.search", "normal_tool" }) {
+                               "repo_browser.print_tree", "repo_browser.search", "repo_browser.open_file", "repo-tools.search",
+                               "functions.foo", "functions.functions", "normal_tool" }) {
         const common_chat_tool tool{ name, "Test tool", string_schema };
         const auto recipient = std::string(name).find('.') == std::string::npos
             ? "functions." + std::string(name) : std::string(name);
@@ -2317,6 +2318,15 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
     assert_contains(history, "to=functions.normal_tool<|channel|>commentary json<|message|>{");
     assert_contains(history, "<|start|>developer<|message|>LATER_POLICY<|end|>");
     assert_equals(true, history.find("FIRST_POLICY") < history.find("LATER_POLICY"));
+    assert_contains(history, "type search =");
+    assert_equals(std::string::npos, history.find("type open ="));
+    assert_equals(std::string::npos, history.find("type find ="));
+    history_inputs.tools.push_back({ "browser.open", "Open", string_schema });
+    history_inputs.tools.push_back({ "browser.find", "Find", string_schema });
+    const auto all_browser_tools = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    assert_contains(all_browser_tools, "type search =");
+    assert_contains(all_browser_tools, "type open =");
+    assert_contains(all_browser_tools, "type find =");
 }
 
 static void test_template_output_peg_parsers(bool detailed_debug) {

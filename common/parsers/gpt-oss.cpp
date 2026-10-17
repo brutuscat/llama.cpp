@@ -146,13 +146,14 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
                     tool_choice |= p.rule("tool-" + name,
                         call(native_name, p.tool_args_raw(raw_body, "code")) | call(ordinary_name, json_args));
                 } else {
-                    auto recipient = (name == "apply_patch" && native_patch) || name.find('.') != std::string::npos
-                        ? p.literal(" to=") + p.optional(p.literal("functions.")) + p.tool_name(p.literal(name))
-                        : ordinary_name;
                     auto args = name == "apply_patch" && native_patch
                         ? json_args | p.tool_args_raw(p.literal("*** Begin Patch") + raw_body, "patch")
                         : json_args;
-                    tool_choice |= p.rule("tool-" + name, call(recipient, args));
+                    auto alternatives = call(ordinary_name, args);
+                    if ((name == "apply_patch" && native_patch) || name.find('.') != std::string::npos) {
+                        alternatives = call(native_name, args) | alternatives;
+                    }
+                    tool_choice |= p.rule("tool-" + name, alternatives);
                 }
             });
 
