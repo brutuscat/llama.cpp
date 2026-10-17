@@ -2552,6 +2552,21 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
     assert_contains(native_collision, "namespace custom {");
     assert_contains(native_collision, "type schema_0_0 = (_: schema_0___0)");
 
+    for (const auto & function : {
+             R"({"name":"no_args","parameters":null})",
+             R"({"name":"no_args"})",
+             R"({"name":"no_args","parameters":{}})" }) {
+        auto no_args_inputs = history_inputs;
+        const auto tool = json{ { "type", "function" }, { "function", json::parse(function) } };
+        no_args_inputs.tools = common_chat_tools_parse_oaicompat(json::array({ tool }));
+        const auto no_args_prompt = common_chat_templates_apply(native_templates.get(), no_args_inputs).prompt;
+        assert_contains(no_args_prompt, "type no_args = () => any;");
+        tst.test(" to=functions.no_args<|channel|>commentary<|message|>{}<|call|>")
+            .tools(no_args_inputs.tools)
+            .expect_tool_calls({ { "no_args", "{}", {} } })
+            .run();
+    }
+
     auto description_inputs = history_inputs;
     description_inputs.messages = { message_user };
     description_inputs.tools = { python, { "browser.search", "Search", string_schema },

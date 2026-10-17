@@ -129,10 +129,14 @@
 {%- endmacro -%}
 
 {%- macro function_definition(tool, name, schema_index) -%}
-  {%- set refs = namespace(paths=[], prefix='schema_' + schema_index|tojson + '_') -%}
   {{- description_comment(tool.description) -}}
-  {{- 'type ' + name + ' = (_: ' + ts_type(tool.parameters, none, tool.parameters, refs) + ') => any;\n\n' -}}
-  {{- reference_definitions(tool.parameters, refs) -}}
+  {%- if tool.parameters is not defined or tool.parameters is none or (tool.parameters is mapping and tool.parameters|length == 0) -%}
+    {{- 'type ' + name + ' = () => any;\n\n' -}}
+  {%- else -%}
+    {%- set refs = namespace(paths=[], prefix='schema_' + schema_index|tojson + '_') -%}
+    {{- 'type ' + name + ' = (_: ' + ts_type(tool.parameters, none, tool.parameters, refs) + ') => any;\n\n' -}}
+    {{- reference_definitions(tool.parameters, refs) -}}
+  {%- endif -%}
 {%- endmacro -%}
 
 {%- macro generic_functions(tools) -%}
