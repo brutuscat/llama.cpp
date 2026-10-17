@@ -2460,6 +2460,46 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
     assert_contains(typeless, "text?: string");
     assert_contains(typeless, "empty_object?: object");
 
+    auto python_history_inputs = history_inputs;
+    python_history_inputs.tools = { { "python", "Ordinary Python function", string_schema } };
+    python_history_inputs.messages = common_chat_msgs_parse_oaicompat(json::parse(R"([
+        {"role":"user","content":"Call the function."},
+        {"role":"assistant","tool_calls":[{"type":"function","function":{"name":"python","arguments":"{\"value\":\"keep me\"}"}}]},
+        {"role":"tool","content":"Recorded"}
+    ])"));
+    const auto ordinary_python = common_chat_templates_apply(native_templates.get(), python_history_inputs).prompt;
+    assert_contains(ordinary_python, "to=functions.python<|channel|>commentary json<|message|>{");
+    assert_contains(ordinary_python, "keep me");
+    assert_contains(ordinary_python, "<|start|>functions.python to=assistant<|channel|>commentary<|message|>Recorded<|end|>");
+    python_history_inputs.messages[1].tool_calls[0].arguments = R"json({"code":"print(1)","timeout":5})json";
+    const auto extra_python_args = common_chat_templates_apply(native_templates.get(), python_history_inputs).prompt;
+    assert_contains(extra_python_args, "to=functions.python<|channel|>commentary json<|message|>{");
+    assert_contains(extra_python_args, "\"timeout\": 5");
+
+    history_inputs.tools.push_back({ "reference_tool", "Referenced schema", R"({
+        "type":"object","$defs":{
+            "Config":{"type":"object","properties":{"path":{"type":"string"},"next":{"$ref":"#/$defs/Config"}},"required":["path"]},
+            "Choices":{"anyOf":[{"type":"integer"},{"type":"string"}]}
+        },"properties":{"config":{"$ref":"#/$defs/Config"},"configs":{"type":"array","items":{"$ref":"#/$defs/Config"}},"choice":{"$ref":"#/$defs/Choices/anyOf/0"}}
+    })" });
+    const auto references = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    assert_contains(references, "path: string");
+    assert_equals(std::string::npos, references.find("config?: any"));
+    assert_equals(std::string::npos, references.find("configs?: any[]"));
+    const auto config_alias = "schema_" + std::to_string(history_inputs.tools.size() - 1) + "_0";
+    assert_contains(references, "config?: " + config_alias);
+    assert_contains(references, "configs?: " + config_alias + "[]");
+    assert_contains(references, "type " + config_alias + " = {\npath: string,\nnext?: " + config_alias + ",\n};");
+    assert_contains(references, "type schema_" + std::to_string(history_inputs.tools.size() - 1) + "_1 = number;");
+    auto root_ref_inputs = history_inputs;
+    root_ref_inputs.tools = { { "root_ref_tool", "Root reference", R"({
+        "$defs":{"Root":{"type":"object","properties":{"root_value":{"type":"boolean"}},"required":["root_value"]}},
+        "$ref":"#/$defs/Root"
+    })" } };
+    const auto root_reference = common_chat_templates_apply(native_templates.get(), root_ref_inputs).prompt;
+    assert_contains(root_reference, "type root_ref_tool = (_: schema_0_0)");
+    assert_contains(root_reference, "type schema_0_0 = {\nroot_value: boolean,\n};");
+
     auto description_inputs = history_inputs;
     description_inputs.messages = { message_user };
     description_inputs.tools = { python, { "browser.search", "Search", string_schema },

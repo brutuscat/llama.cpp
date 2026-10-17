@@ -2,8 +2,7 @@
   Derived from the GPT-OSS template served by the Guardian b10566 /props endpoint.
   Base SHA256: b2215de6da8ba369957eece8c5aa18f4af94f6c4d311d85e691373a421d80e89
 
-  This overlay deliberately leaves dotted tools in the API `tools` payload so
-  llama.cpp can parse their schemas, but never renders them in `functions`.
+  This overlay deliberately leaves dotted tools in the API `tools` payload so llama.cpp can parse their schemas, but never renders them in `functions`.
   Browser, container, and repo_browser are declared in their native Harmony namespaces.
 #}
 {%- macro property_name(name) -%}
@@ -21,7 +20,7 @@
   {{- '// ' + (text or '')|replace('\r\n', '\n')|replace('\r', '\n')|replace('\n', '\n// ') + '\n' -}}
 {%- endmacro -%}
 
-{%- macro object_properties(spec) -%}
+{%- macro object_properties(spec, root, refs) -%}
   {%- for name, member in (spec.properties or {}).items() -%}
     {%- if member.description -%}
       {{- description_comment(member.description) -}}
@@ -29,11 +28,11 @@
     {%- if 'default' in member -%}
       {{- '// default: ' + member['default']|tojson + '\n' -}}
     {%- endif -%}
-    {{- property_name(name) + ('' if name in (spec.required or []) else '?') + ': ' + ts_type(member) + ',\n' -}}
+    {{- property_name(name) + ('' if name in (spec.required or []) else '?') + ': ' + ts_type(member, none, root, refs) + ',\n' -}}
   {%- endfor -%}
 {%- endmacro -%}
 
-{%- macro ts_type(spec, type_override=none) -%}
+{%- macro ts_type(spec, type_override=none, root=none, refs=none) -%}
   {%- set kind = spec.type if type_override is none else type_override -%}
   {%- if type_override is none and spec.type is not defined -%}
     {%- if 'properties' in spec or ('additionalProperties' in spec and spec.additionalProperties != true) -%}
@@ -46,40 +45,61 @@
       {%- set kind = 'any' -%}
     {%- endif -%}
   {%- endif -%}
-  {%- if type_override is none and 'const' in spec -%}
+  {%- if '$ref' in spec -%}
+    {%- if spec['$ref'] is not string or not spec['$ref'].startswith('#/') -%}{{- raise_exception('Only same-document #/ schema references are supported') -}}{%- endif -%}
+    {%- if spec['$ref'] not in refs.paths -%}{%- set refs.paths = refs.paths + [spec['$ref']] -%}{%- endif -%}
+    {%- for path in refs.paths -%}
+      {%- if path == spec['$ref'] -%}{{- 'schema_' + refs.prefix + '_' + loop.index0|tojson -}}{%- endif -%}
+    {%- endfor -%}
+  {%- elif type_override is none and 'const' in spec -%}
     {{- spec['const']|tojson -}}
   {%- elif type_override is none and spec.enum -%}
     {%- for value in spec.enum -%}{{ value|tojson }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
   {%- elif type_override is none and (spec.oneOf or spec.anyOf) -%}
-    {%- if spec.type is defined -%}{{- '(' + ts_type(spec, spec.type) + ') & ' -}}{%- endif -%}
+    {%- if spec.type is defined -%}{{- '(' + ts_type(spec, spec.type, root, refs) + ') & ' -}}{%- endif -%}
     {%- for keyword in ['oneOf', 'anyOf'] -%}
       {%- if spec[keyword] -%}
         {{- ' & ' if keyword == 'anyOf' and spec.oneOf else '' -}}
         {{- '(' -}}
-        {%- for alternative in spec[keyword] -%}{{ ts_type(alternative) }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
+        {%- for alternative in spec[keyword] -%}{{ ts_type(alternative, none, root, refs) }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
         {{- ')' -}}
       {%- endif -%}
     {%- endfor -%}
   {%- elif kind is iterable and kind is not string -%}
-    {%- for member in kind -%}{{ ts_type(spec, member) }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
+    {%- for member in kind -%}{{ ts_type(spec, member, root, refs) }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
   {%- elif kind == 'string' -%}string
   {%- elif kind in ['number', 'integer'] -%}number
   {%- elif kind == 'boolean' -%}boolean
   {%- elif kind == 'null' -%}null
   {%- elif kind == 'array' -%}
-    {%- set item_type = ts_type(spec['items']) if 'items' in spec else 'any' -%}
+    {%- set item_type = ts_type(spec['items'], none, root, refs) if 'items' in spec else 'any' -%}
     {{- '(' + item_type + ')' if ' | ' in item_type else item_type -}}[]
   {%- elif kind == 'object' -%}
-    {{- '{\n' + object_properties(spec) + '}' if spec.properties else 'object' -}}
+    {{- '{\n' + object_properties(spec, root, refs) + '}' if spec.properties else 'object' -}}
   {%- else -%}any
   {%- endif -%}
 {%- endmacro -%}
 
-{%- macro function_definition(tool, name) -%}
+{%- macro reference_definitions(root, refs, index=0) -%}
+  {%- if index < refs.paths|length -%}
+    {%- set target = namespace(value=root) -%}
+    {%- for key in refs.paths[index][2:].split('/') -%}
+      {%- if target.value is mapping and key in target.value -%}
+        {%- set target.value = target.value[key] -%}
+      {%- elif target.value is iterable and target.value is not string and target.value is not mapping and key == (key|int)|tojson and key|int >= 0 and key|int < target.value|length -%}
+        {%- set target.value = target.value[key|int] -%}
+      {%- else -%}{{- raise_exception('Cannot resolve schema reference: ' + refs.paths[index]) -}}{%- endif -%}
+    {%- endfor -%}
+    {{- 'type schema_' + refs.prefix + '_' + index|tojson + ' = ' + ts_type(target.value, none, root, refs) + ';\n\n' -}}
+    {{- reference_definitions(root, refs, index + 1) -}}
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro function_definition(tool, name, schema_index) -%}
+  {%- set refs = namespace(paths=[], prefix=schema_index|tojson) -%}
   {{- description_comment(tool.description) -}}
-  {{- 'type ' + name + ' = (_: {\n' -}}
-  {{- object_properties(tool.parameters) -}}
-  {{- '}) => any;\n\n' -}}
+  {{- 'type ' + name + ' = (_: ' + ts_type(tool.parameters, none, tool.parameters, refs) + ') => any;\n\n' -}}
+  {{- reference_definitions(tool.parameters, refs) -}}
 {%- endmacro -%}
 
 {%- macro generic_functions(tools) -%}
@@ -91,7 +111,7 @@
         {{- '## functions\n\nnamespace functions {\n\n' -}}
         {%- set rendered.any = true -%}
       {%- endif -%}
-      {{- function_definition(tool, tool.name) -}}
+      {{- function_definition(tool, tool.name, loop.index0) -}}
     {%- endif -%}
   {%- endfor -%}
   {%- if rendered.any -%}{{- '} // namespace functions' -}}{%- endif -%}
@@ -106,7 +126,7 @@
         {{- '## ' + namespace_name + '\n\nnamespace ' + namespace_name + ' {\n\n' -}}
         {%- set rendered.any = true -%}
       {%- endif -%}
-      {{- function_definition(tool, tool.name[(namespace_name|length)+1:]) -}}
+      {{- function_definition(tool, tool.name[(namespace_name|length)+1:], loop.index0) -}}
     {%- endif -%}
   {%- endfor -%}
   {%- if rendered.any -%}{{- '} // namespace ' + namespace_name + '\n\n' -}}{%- endif -%}
@@ -126,7 +146,7 @@
         {{- description_comment(tool.description) -}}
         {{- 'Send code directly to the bare recipient python; do not wrap it in JSON.\n\n' -}}
       {%- else -%}
-        {{- function_definition(tool, tool.name) -}}
+        {{- function_definition(tool, tool.name, loop.index0) -}}
       {%- endif -%}
     {%- endif -%}
   {%- endfor -%}
@@ -165,19 +185,22 @@
       {%- if loop.index0 > last_final.index -%}
         {%- if message.content -%}{{- '<|start|>assistant<|channel|>analysis<|message|>' + message.content + '<|end|>' -}}{%- elif message.thinking -%}{{- '<|start|>assistant<|channel|>analysis<|message|>' + message.thinking + '<|end|>' -}}{%- endif -%}
       {%- endif -%}
-      {%- if call.name == 'python' and builtin_tools and 'python' in builtin_tools -%}
+      {%- set python_enabled = call.name == 'python' and builtin_tools and 'python' in builtin_tools -%}
+      {%- set raw_python = python_enabled and 'code' in call.arguments and call.arguments.code is string and call.arguments|length == 1 -%}
+      {%- set call_recipient = 'functions.python' if python_enabled and not raw_python else recipient(call.name) -%}
+      {%- if raw_python -%}
         {{- '<|start|>assistant to=python<|channel|>commentary<|message|>' + call.arguments.code + '<|call|>' -}}
       {%- else -%}
-        {{- '<|start|>assistant to=' + recipient(call.name) + '<|channel|>commentary ' + (call.content_type if call.content_type is defined else 'json') + '<|message|>' + call.arguments|tojson + '<|call|>' -}}
+        {{- '<|start|>assistant to=' + call_recipient + '<|channel|>commentary ' + (call.content_type if call.content_type is defined else 'json') + '<|message|>' + call.arguments|tojson + '<|call|>' -}}
       {%- endif -%}
-      {%- set last_tool_call.name = call.name -%}
+      {%- set last_tool_call.name = call_recipient -%}
     {%- else -%}
       {{- '<|start|>assistant<|channel|>final<|message|>' + message.content + '<|end|>' -}}
       {%- set last_tool_call.name = none -%}
     {%- endif -%}
   {%- elif message.role == 'tool' -%}
     {%- if last_tool_call.name is none -%}{{- raise_exception('Tool message has no preceding tool call') -}}{%- endif -%}
-    {{- '<|start|>' + recipient(last_tool_call.name) + ' to=assistant<|channel|>commentary<|message|>' + message.content + '<|end|>' -}}
+    {{- '<|start|>' + last_tool_call.name + ' to=assistant<|channel|>commentary<|message|>' + message.content + '<|end|>' -}}
     {%- set last_tool_call.name = none -%}
   {%- elif message.role == 'user' -%}
     {{- '<|start|>user<|message|>' + message.content + '<|end|>' -}}
