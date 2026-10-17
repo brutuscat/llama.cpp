@@ -31,14 +31,6 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
 
     data.prompt            = prompt;
     data.generation_prompt = common_chat_template_generation_prompt_impl(tmpl, inputs, /* messages_override= */ adjusted_messages);
-    data.message_delimiters = {
-        { COMMON_CHAT_ROLE_ASSISTANT, "<|start|>assistant" },
-        { COMMON_CHAT_ROLE_USER,      "<|start|>user"      },
-        { COMMON_CHAT_ROLE_SYSTEM,    "<|start|>developer" },
-        { COMMON_CHAT_ROLE_SYSTEM,    "<|start|>system"    },
-        { COMMON_CHAT_ROLE_TOOL,      "<|start|>functions" },
-    };
-
     data.format            = COMMON_CHAT_FORMAT_PEG_NATIVE;
     data.supports_thinking = true;
 
@@ -84,6 +76,14 @@ common_chat_params common_chat_params_init_gpt_oss(const common_chat_template & 
         if ((name == "python" && native_python) || (name == "apply_patch" && native_patch) || name.find('.') != std::string::npos) {
             data.message_delimiters.add(COMMON_CHAT_ROLE_TOOL, "<|start|>" + name);
         }
+    });
+    // Native recipients must precede shorter role prefixes such as user in user.lookup.
+    data.message_delimiters.delimiters.insert(data.message_delimiters.delimiters.end(), {
+        { COMMON_CHAT_ROLE_ASSISTANT, "<|start|>assistant" },
+        { COMMON_CHAT_ROLE_USER,      "<|start|>user"      },
+        { COMMON_CHAT_ROLE_SYSTEM,    "<|start|>developer" },
+        { COMMON_CHAT_ROLE_SYSTEM,    "<|start|>system"    },
+        { COMMON_CHAT_ROLE_TOOL,      "<|start|>functions" },
     });
 
     auto parser = build_chat_peg_parser([&](common_chat_peg_builder & p) {

@@ -17,10 +17,14 @@
   {{- name if identifier.valid else name|tojson -}}
 {%- endmacro -%}
 
+{%- macro description_comment(text) -%}
+  {{- '// ' + (text or '')|replace('\r\n', '\n')|replace('\r', '\n')|replace('\n', '\n// ') + '\n' -}}
+{%- endmacro -%}
+
 {%- macro object_properties(spec) -%}
   {%- for name, member in (spec.properties or {}).items() -%}
     {%- if member.description -%}
-      {{- '// ' + member.description|replace('\r\n', '\n')|replace('\r', '\n')|replace('\n', '\n// ') + '\n' -}}
+      {{- description_comment(member.description) -}}
     {%- endif -%}
     {%- if 'default' in member -%}
       {{- '// default: ' + member['default']|tojson + '\n' -}}
@@ -61,7 +65,7 @@
 {%- endmacro -%}
 
 {%- macro function_definition(tool, name) -%}
-  {{- '// ' + (tool.description or '') + '\n' -}}
+  {{- description_comment(tool.description) -}}
   {{- 'type ' + name + ' = (_: {\n' -}}
   {{- object_properties(tool.parameters) -}}
   {{- '}) => any;\n\n' -}}
@@ -108,7 +112,7 @@
     {%- if builtin_tools and tool.name in builtin_tools and tool.name in ['python', 'apply_patch'] -%}
       {{- '## ' + tool.name + '\n\n' -}}
       {%- if tool.name == 'python' -%}
-        {{- '// ' + (tool.description or '') + '\n' -}}
+        {{- description_comment(tool.description) -}}
         {{- 'Send code directly to the bare recipient python; do not wrap it in JSON.\n\n' -}}
       {%- else -%}
         {{- function_definition(tool, tool.name) -}}

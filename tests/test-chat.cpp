@@ -2440,6 +2440,33 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
     assert_contains(defaults, "// default: null\nvalue?: string | null");
     assert_contains(defaults, "// Use this mode when omitted.\n// default: \"read\\n\\\"only\\\"\"\nmode?: string");
 
+    auto description_inputs = history_inputs;
+    description_inputs.messages = { message_user };
+    description_inputs.tools = { python, { "browser.search", "Search", string_schema },
+                                 { "normal_tool", "Ordinary", string_schema } };
+    for (auto & tool : description_inputs.tools) { tool.description = "First line\r\nSecond line\rThird line\nFourth line"; }
+    const auto descriptions_prompt = common_chat_templates_apply(native_templates.get(), description_inputs).prompt;
+    const std::string comment = "// First line\n// Second line\n// Third line\n// Fourth line\n";
+    assert_contains(descriptions_prompt, comment + "type normal_tool =");
+    assert_contains(descriptions_prompt, comment + "type search =");
+    assert_contains(descriptions_prompt, comment + "Send code directly to the bare recipient python;");
+
+    for (const auto & role : { "user", "assistant", "system", "developer", "functions" }) {
+        restricted_inputs.tools = { { std::string(role) + ".lookup", "Lookup", string_schema } };
+        auto delimiters = common_chat_templates_apply(fixture_templates.get(), restricted_inputs).message_delimiters;
+        // Model-independent token sequences retain the real headers' prefix relationship.
+        for (auto & delimiter : delimiters.delimiters) {
+            delimiter.tokens.assign(delimiter.delimiter.begin(), delimiter.delimiter.end());
+        }
+        const std::string prompt = "<|start|>user<|message|>Question<|end|><|start|>" + std::string(role) +
+            ".lookup to=assistant<|channel|>commentary<|message|>Result<|end|>";
+        const auto spans = delimiters.split(llama_tokens(prompt.begin(), prompt.end()));
+        assert_equals<size_t>(2, spans.spans.size());
+        assert_equals(COMMON_CHAT_ROLE_USER, spans.spans[0].role);
+        assert_equals(COMMON_CHAT_ROLE_TOOL, spans.spans[1].role);
+        assert_equals<int32_t>(0, spans.last_user_message_pos());
+    }
+
     for (const bool reverse : { false, true }) {
         std::vector<common_chat_tool> colliding_tools = {
             { "repo.tools", "Dotted tool", R"({"type":"object","properties":{"dotted":{"type":"string"}},"required":["dotted"],"additionalProperties":false})" },
