@@ -2440,6 +2440,26 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
     assert_contains(defaults, "// default: null\nvalue?: string | null");
     assert_contains(defaults, "// Use this mode when omitted.\n// default: \"read\\n\\\"only\\\"\"\nmode?: string");
 
+    history_inputs.tools.push_back({ "typeless_tool", "Structural schemas", R"({
+        "type":"object","properties":{
+            "config":{"properties":{"path":{"type":"string"}},"required":["path"]},
+            "values":{"items":{"type":"integer"}},
+            "anything":{},
+            "free":{"additionalProperties":true},
+            "closed":{"additionalProperties":false},
+            "text":{"minLength":1},
+            "empty_object":{"properties":{}}
+        }
+    })" });
+    const auto typeless = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    assert_contains(typeless, "config?: {\npath: string,\n}");
+    assert_contains(typeless, "values?: number[]");
+    assert_contains(typeless, "anything?: any");
+    assert_contains(typeless, "free?: any");
+    assert_contains(typeless, "closed?: object");
+    assert_contains(typeless, "text?: string");
+    assert_contains(typeless, "empty_object?: object");
+
     auto description_inputs = history_inputs;
     description_inputs.messages = { message_user };
     description_inputs.tools = { python, { "browser.search", "Search", string_schema },

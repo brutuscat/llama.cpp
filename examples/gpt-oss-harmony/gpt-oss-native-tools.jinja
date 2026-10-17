@@ -35,6 +35,17 @@
 
 {%- macro ts_type(spec, type_override=none) -%}
   {%- set kind = spec.type if type_override is none else type_override -%}
+  {%- if type_override is none and spec.type is not defined -%}
+    {%- if 'properties' in spec or ('additionalProperties' in spec and spec.additionalProperties != true) -%}
+      {%- set kind = 'object' -%}
+    {%- elif 'items' in spec or 'prefixItems' in spec -%}
+      {%- set kind = 'array' -%}
+    {%- elif 'pattern' in spec or 'minLength' in spec or 'maxLength' in spec -%}
+      {%- set kind = 'string' -%}
+    {%- else -%}
+      {%- set kind = 'any' -%}
+    {%- endif -%}
+  {%- endif -%}
   {%- if type_override is none and 'const' in spec -%}
     {{- spec['const']|tojson -}}
   {%- elif type_override is none and spec.enum -%}
