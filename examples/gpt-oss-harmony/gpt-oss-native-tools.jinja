@@ -55,13 +55,18 @@
     {{- spec['const']|tojson -}}
   {%- elif type_override is none and spec.enum -%}
     {%- for value in spec.enum -%}{{ value|tojson }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
-  {%- elif type_override is none and (spec.oneOf or spec.anyOf) -%}
+  {%- elif type_override is none and (spec.oneOf or spec.anyOf or spec.allOf) -%}
     {%- if spec.type is defined -%}{{- '(' + ts_type(spec, spec.type, root, refs) + ') & ' -}}{%- endif -%}
-    {%- for keyword in ['oneOf', 'anyOf'] -%}
+    {%- set composition = namespace(rendered=false) -%}
+    {%- for keyword in ['oneOf', 'anyOf', 'allOf'] -%}
       {%- if spec[keyword] -%}
-        {{- ' & ' if keyword == 'anyOf' and spec.oneOf else '' -}}
+        {{- ' & ' if composition.rendered else '' -}}
+        {%- set composition.rendered = true -%}
         {{- '(' -}}
-        {%- for alternative in spec[keyword] -%}{{ ts_type(alternative, none, root, refs) }}{{ ' | ' if not loop.last else '' }}{%- endfor -%}
+        {%- for alternative in spec[keyword] -%}
+          {{- ts_type(alternative, none, root, refs) -}}
+          {{- (' & ' if keyword == 'allOf' else ' | ') if not loop.last else '' -}}
+        {%- endfor -%}
         {{- ')' -}}
       {%- endif -%}
     {%- endfor -%}
@@ -72,8 +77,15 @@
   {%- elif kind == 'boolean' -%}boolean
   {%- elif kind == 'null' -%}null
   {%- elif kind == 'array' -%}
-    {%- set item_type = ts_type(spec['items'], none, root, refs) if 'items' in spec else 'any' -%}
-    {{- '(' + item_type + ')' if ' | ' in item_type else item_type -}}[]
+    {%- set items = spec['items'] if 'items' in spec else (spec.prefixItems if 'prefixItems' in spec else {}) -%}
+    {%- if items is iterable and items is not mapping and items is not string -%}
+      {{- '[' -}}
+      {%- for item in items -%}{{ ts_type(item, none, root, refs) }}{{ ', ' if not loop.last else '' }}{%- endfor -%}
+      {{- ']' -}}
+    {%- else -%}
+      {%- set item_type = ts_type(items, none, root, refs) -%}
+      {{- '(' + item_type + ')' if ' | ' in item_type else item_type -}}[]
+    {%- endif -%}
   {%- elif kind == 'object' -%}
     {{- '{\n' + object_properties(spec, root, refs) + '}' if spec.properties else 'object' -}}
   {%- else -%}any

@@ -2500,6 +2500,26 @@ static void test_gpt_oss_native_tool_recipients(bool detailed_debug) {
     assert_contains(root_reference, "type root_ref_tool = (_: schema_0_0)");
     assert_contains(root_reference, "type schema_0_0 = {\nroot_value: boolean,\n};");
 
+    history_inputs.tools.push_back({ "composition_tool", "Intersections and tuples", R"({
+        "type":"object","properties":{
+            "config":{"allOf":[{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]},{"type":"object","properties":{"mode":{"type":"string"}},"required":["mode"]}]},
+            "pair":{"type":"array","prefixItems":[{"type":"string"},{"type":"integer"}]},
+            "inferred_pair":{"prefixItems":[{"type":"boolean"},{"type":"null"}]},
+            "legacy_pair":{"type":"array","items":[{"type":"number"},{"type":"string"}]},
+            "preferred":{"type":"array","items":{"type":"integer"},"prefixItems":[{"type":"string"}]}
+        }
+    })" });
+    const auto compositions = common_chat_templates_apply(native_templates.get(), history_inputs).prompt;
+    const bool intersection = compositions.find("config?: ({\npath: string,\n} & {\nmode: string,\n})") != std::string::npos;
+    const bool tuples = compositions.find("pair?: [string, number]") != std::string::npos &&
+        compositions.find("inferred_pair?: [boolean, null]") != std::string::npos &&
+        compositions.find("legacy_pair?: [number, string]") != std::string::npos &&
+        compositions.find("preferred?: number[]") != std::string::npos;
+    if (!intersection || !tuples) {
+        throw std::runtime_error("Composition regression: intersection=" + std::to_string(intersection) +
+                                 ", tuples=" + std::to_string(tuples));
+    }
+
     auto description_inputs = history_inputs;
     description_inputs.messages = { message_user };
     description_inputs.tools = { python, { "browser.search", "Search", string_schema },
